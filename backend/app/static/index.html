@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbi</title>
+<style>
+  /* Minimal functional scaffold — the real UI is the React app. */
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f1220; color: #e8e8f0; min-height: 100vh; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 24px 16px 140px; }
+  h1 { font-size: 1.3rem; margin-bottom: 16px; }
+  .card { background: #1a1e33; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 0.95rem; margin-bottom: 10px; color: #9aa2d8; }
+  button { background: #5661f0; color: white; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 0.9rem; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  input { background: #10132a; color: #e8e8f0; border: 1px solid #333a5e; border-radius: 8px; padding: 8px 10px; font-size: 0.9rem; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+  .muted { color: #8a90b8; font-size: 0.85rem; }
+  .member { padding: 4px 0; font-size: 0.9rem; }
+  .ok { color: #7ee787; } .warn { color: #f0b45e; }
+
+  /* Orbi orb + chat panel */
+  #orb { position: fixed; right: 24px; bottom: 24px; width: 64px; height: 64px; border-radius: 50%;
+         background: radial-gradient(circle at 30% 30%, #8f9bff, #4633d8 70%);
+         box-shadow: 0 0 24px #5661f088; cursor: pointer; border: 0;
+         animation: float 3s ease-in-out infinite; }
+  @keyframes float { 50% { transform: translateY(-6px); } }
+  #panel { position: fixed; right: 24px; bottom: 100px; width: min(380px, calc(100vw - 48px));
+           background: #171b30; border: 1px solid #333a5e; border-radius: 14px; display: none;
+           flex-direction: column; max-height: 70vh; }
+  #panel.open { display: flex; }
+  #log { flex: 1; overflow-y: auto; padding: 14px; }
+  .msg { margin-bottom: 10px; line-height: 1.4; font-size: 0.92rem; white-space: pre-wrap; }
+  .msg.user { color: #b9c2ff; } .msg.user::before { content: "you  "; color: #667; font-size: 0.75rem; }
+  .msg.orbi::before { content: "orbi  "; color: #667; font-size: 0.75rem; }
+  .msg.step { color: #8a90b8; font-size: 0.8rem; font-style: italic; }
+  #chatform { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #333a5e; }
+  #chatform input { flex: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Orbi <span class="muted">— group scheduling assistant (scaffold UI)</span></h1>
+
+  <div class="card" id="authcard">
+    <h2>Account</h2>
+    <div id="authbody"><button onclick="location='/auth/google/login'">Connect Google Calendar</button></div>
+  </div>
+
+  <div class="card" id="groupcard" style="display:none">
+    <h2>Your group</h2>
+    <div id="groupbody"></div>
+  </div>
+
+  <div class="card" id="pollcard" style="display:none">
+    <h2>Polls</h2>
+    <div id="pollbody" class="muted">No polls yet — ask Orbi to propose a time.</div>
+  </div>
+</div>
+
+<button id="orb" title="Talk to Orbi"></button>
+<div id="panel">
+  <div id="log"><div class="msg orbi">Hi! Ask me to find a time for your group to meet.</div></div>
+  <form id="chatform">
+    <input id="chatinput" placeholder="Find a time this week…" autocomplete="off">
+    <button>Send</button>
+  </form>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let me = null, group = null, history = [];
+
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { credentials: "include",
+    headers: { "Content-Type": "application/json" }, ...opts });
+  if (!r.ok) throw (await r.json()).detail || r.statusText;
+  return r.json();
+};
+
+async function boot() {
+  try { me = await api("/auth/me"); } catch { return; }  // not logged in
+  $("authbody").innerHTML = `<div class="row"><span>${me.email}</span>
+    <span class="${me.calendar_connected ? "ok" : "warn"}">
+      ${me.calendar_connected ? "calendar connected" : "calendar NOT connected"}</span></div>`;
+  $("groupcard").style.display = "";
+  const groups = await api("/groups");
+  if (groups.length) { group = groups[0]; renderGroup(); }
+  else $("groupbody").innerHTML = `
+    <div class="row"><input id="gname" placeholder="Group name">
+      <button onclick="createGroup()">Create</button></div>
+    <div class="row"><input id="gcode" placeholder="Invite code" maxlength="6">
+      <button onclick="joinGroup()">Join</button></div>`;
+}
+
+async function renderGroup() {
+  const members = await api(`/groups/${group.id}/members`);
+  $("groupbody").innerHTML = `
+    <div class="row"><b>${group.name}</b>
+      <span class="muted">invite code: <b>${group.invite_code}</b></span></div>
+    ${members.map(m => `<div class="member">${m.email}
+      <span class="${m.calendar_connected ? "ok" : "warn"}">
+        ${m.calendar_connected ? "✓" : "no calendar"}</span></div>`).join("")}`;
+  $("pollcard").style.display = "";
+  renderPolls();
+}
+
+async function renderPolls() {
+  const polls = await api(`/groups/${group.id}/polls`);
+  if (!polls.length) return;
+  $("pollbody").innerHTML = polls.map(p => `
+    <div class="member" style="margin-bottom:8px">
+      <b>${p.title}</b> — ${p.start_local} → ${p.end_local}
+      ${p.location ? `<span class="muted">@ ${p.location}</span>` : ""}<br>
+      <span class="muted">${p.yes} yes / ${p.no} no (needs ${p.min_yes} yes) —
+        <b class="${p.status === "approved" ? "ok" : p.status === "rejected" ? "warn" : ""}">${p.status}</b>
+        ${p.booked ? ` · <a href="${p.event_link}" target="_blank" style="color:#7ee787">booked ✓</a>` : ""}
+      </span>
+      ${p.status === "open" && !p.booked ? `
+        <span style="margin-left:8px">
+          <button onclick="votePoll(${p.id}, true)">Yes</button>
+          <button onclick="votePoll(${p.id}, false)" style="background:#7a3a4a">No</button>
+        </span>` : ""}
+    </div>`).join("");
+}
+
+window.votePoll = async (id, yes) => {
+  try { await api(`/polls/${id}/vote`, { method: "POST", body: JSON.stringify({ yes }) }); }
+  catch (e) { alert(e); }
+  renderPolls();
+};
+
+window.createGroup = async () => {
+  group = await api("/groups", { method: "POST",
+    body: JSON.stringify({ name: $("gname").value || "My Group" }) });
+  renderGroup();
+};
+window.joinGroup = async () => {
+  try {
+    group = await api("/groups/join", { method: "POST",
+      body: JSON.stringify({ invite_code: $("gcode").value.toUpperCase() }) });
+    renderGroup();
+  } catch (e) { alert(e); }
+};
+
+$("orb").onclick = () => $("panel").classList.toggle("open");
+
+function addMsg(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls; d.textContent = text;
+  $("log").appendChild(d); $("log").scrollTop = 1e9;
+  return d;
+}
+
+$("chatform").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("chatinput").value.trim();
+  if (!text) return;
+  $("chatinput").value = "";
+  addMsg("user", text);
+  const thinking = addMsg("step", "Orbi is thinking…");
+  try {
+    const res = await api("/chat", { method: "POST", body: JSON.stringify({
+      group_id: group ? group.id : null, message: text, history }) });
+    thinking.remove();
+    for (const s of res.trace)
+      if (s.kind === "tool_call") addMsg("step", `⚙ ${s.name}(${JSON.stringify(s.detail)})`);
+    addMsg("orbi", res.reply);
+    history.push({ role: "user", content: text },
+                 { role: "assistant", content: res.reply });
+    history = history.slice(-40);
+  } catch (err) { thinking.textContent = "Error: " + err; }
+};
+
+boot();
+</script>
+</body>
+</html>
