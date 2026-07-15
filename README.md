@@ -10,6 +10,21 @@ Orbi cross-references everyone's live availability, proposes a time and venue wi
 
 ---
 
+> ## Status — July 2026
+>
+> **Phases 1–3 are complete and verified end-to-end**: live `freebusy` across real
+> Google Calendars → common-slot intersection → in-app poll → threshold rule →
+> a **real booking** written to every member's calendar.
+>
+> - **Live deployment:** <https://orbi-1jgh.onrender.com> (Render free tier — the
+>   first request after it's been idle can take ~50s to wake up).
+> - **Google Calendar add-on:** talk to Orbi from *inside* Google Calendar, not
+>   just the web app — see [`addon/`](addon/).
+> - **Model:** Llama 3.3 70B on Groq's free tier (no paid APIs anywhere).
+> - **Remaining:** Phase 4 (venue suggestions) is the only optional piece left.
+
+---
+
 ## The Problem
 
 Groups with shared calendars still can't schedule. Manually cross-referencing five calendars is tedious, and raw free/busy data doesn't answer the real questions:
@@ -43,16 +58,22 @@ Every turn, the backend injects into the model's context:
 
 ### Tools
 
+Built and wired into the agent (Phases 1–3):
+
 | Tool | What it does |
 |---|---|
 | `get_group_members` | Resolve the user's group → member list + calendar connection status |
-| `get_free_busy` | Live `freebusy.query` against Google Calendar for all members over a time range. Returns **only busy time ranges** — never titles or details |
-| `find_common_slots` | Intersect busy blocks → common free windows, filtered to reasonable hours and requested duration (pure function, unit-tested) |
+| `find_meeting_slots` | Live `freebusy.query` for all members, then intersect busy blocks → common free windows, filtered to reasonable local hours and the requested duration. Returns **only busy time ranges** — never titles or details. The intersection math is a pure, unit-tested function |
+| `create_poll` | Propose a confirmed slot to the group as an in-app poll |
+| `get_poll_status` | Read the current tally and re-evaluate the decision rule (approved / rejected / pending) |
+| `book_meeting` | Write the **approved** poll's event to every member's calendar via Google invites. Refuses anything not approved |
+
+Planned for Phase 4 (venue suggestions, not yet built):
+
+| Tool | What it will do |
+|---|---|
 | `get_event_locations` | Locations users explicitly typed into their own events adjacent to a candidate slot → geographic anchor |
 | `search_venues` | Real Places API call near the anchor. No results → Orbi says so. **It never invents a venue** |
-| `create_poll` | Propose slot (+ venue) to the group as an in-app poll |
-| `get_poll_status` | Read votes collected so far |
-| `create_calendar_event` | Write the approved event to the shared group calendar |
 
 ### The decision loop (propose → observe → decide → commit or re-plan)
 
@@ -96,7 +117,16 @@ This is a design principle, not a feature:
 
 ## Scope Guard
 
-Orbi does group scheduling and meetup planning. Nothing else. Asked to write an essay or discuss the weather, it politely declines and restates what it can do. Enforced in the system prompt and covered by tests.
+Orbi does group scheduling and meetup planning. Nothing else. Asked to write an essay or discuss the weather, it politely declines and restates what it can do. Enforced in the system prompt and verified against injection-style prompts.
+
+## Google Calendar Add-on
+
+Beyond the web app, Orbi ships as a **Google Workspace Add-on** so you can talk
+to it from a side panel *inside* Google Calendar — no context-switching. The
+add-on is a thin client: all reasoning, tools, and data stay in the backend.
+It calls a dedicated `POST /addon/chat` endpoint secured by a shared secret,
+looks the user up by email, and runs the exact same agent loop as the web app.
+Setup lives in [`addon/README.md`](addon/README.md).
 
 ## Tech Stack
 
@@ -106,27 +136,36 @@ Orbi does group scheduling and meetup planning. Nothing else. Asked to write an 
 | Agent | Llama 3.3 70B via Groq (free tier) with native tool calling; Ollama/OpenAI swappable via `LLM_PROVIDER` |
 | Calendar | Google Calendar API — OAuth 2.0, `calendar.readonly` + `calendar.events` scopes, `freebusy.query` |
 | Venues | Google Places API (Phase 4) |
-| Frontend | React (teammate's branch). Backend exposes a documented REST API with example request/response bodies for every endpoint |
-| Storage | SQLite (hackathon-appropriate; swappable) |
+| Frontend | React (teammate's branch). Backend exposes a documented REST API with example request/response bodies for every endpoint. A minimal scaffold UI ships in `backend/app/static/` for testing |
+| Storage | **SQLite** locally, **Postgres** in production — auto-selected by the `DATABASE_URL` env var (Render injects it). Same code, no migrations |
+| Hosting | Render (free tier) via a one-click `render.yaml` blueprint that also provisions the Postgres database |
+| Add-on | Google Workspace Add-on (Apps Script + CardService) that calls the same backend — Orbi inside Google Calendar |
 | Timezones | Everything stored in UTC; converted to each user's local timezone at display time. Unit-tested |
 
-### Repository layout (planned)
+### Repository layout
 
 ```
 backend/
   app/
     main.py            # FastAPI app
+    core/config.py     # env-driven settings (one place for all config)
     auth/              # Google OAuth flow + token refresh
     agent/             # agent loop, system prompt, tool definitions
-    tools/             # Tool implementations (freebusy, intersection, places, …)
-    models/            # DB models: users, groups, polls, votes
-    api/               # REST endpoints for the frontend
+    tools/             # freebusy, slot intersection, poll rules, booking
+    db/                # SQLAlchemy models + repo + session (users, groups, polls, votes)
+    api/               # REST endpoints (auth, groups, polls, chat, addon)
+    static/            # minimal scaffold UI (Orbi orb + chat)
   scripts/
     check_freebusy.py  # Phase 1 CLI proof: OAuth + freebusy + intersection
-    seed_demo.py       # Populate 3–4 test calendars with realistic Beirut events
-  tests/
+    check_phase3.py    # Phase 3 proof: poll → votes → rule → real booking
+    seed_demo.py       # Populate test calendars with realistic Beirut events
+    connect_account.py # One-time OAuth connect per test account (CLI)
+  tests/               # slot math + poll rule unit tests
+addon/                 # Google Calendar add-on (Apps Script + manifest)
 docs/
   api.md               # Endpoint reference with example bodies
+  deploy.md            # Render deployment walkthrough
+render.yaml            # One-click blueprint: web service + free Postgres
 ```
 
 ## Setup
@@ -157,9 +196,10 @@ Full walkthrough in [docs/deploy.md](docs/deploy.md).
 | Phase | Deliverable | Status |
 |---|---|---|
 | 1 | Google OAuth + freebusy across test accounts + intersection logic, proven via CLI script | ✅ |
-| 2 | Conversational agent + Orbi orb UI: open-ended prompt → candidate slots → reasoning in natural language | ✅ (agent chat needs the free `GROQ_API_KEY` in `.env`) |
+| 2 | Conversational agent + Orbi orb UI: open-ended prompt → candidate slots → reasoning in natural language | ✅ (agent chat needs the free `GROQ_API_KEY`) |
 | 3 | Poll → vote collection → threshold rule → commit to shared calendar or re-plan | ✅ (verified end-to-end incl. a real booking) |
 | 4 | Venue suggestion via Places API (only if time permits) | ⬜ |
+| + | **Deployed** to Render with Postgres, plus a **Google Calendar add-on** | ✅ (bonus, beyond the original plan) |
 
 Each phase must work before the next begins.
 
@@ -173,7 +213,8 @@ Each phase must work before the next begins.
 
 ## Roadmap / Not Yet Built
 
-Everything. This README is the spec; code follows phase by phase. Beyond Phase 4:
+Phases 1–3 are built, verified, and deployed; Phase 4 (venues) is the next
+optional step. Beyond that:
 
 - Push/real-time notifications (out of scope — polls are in-app; Google's own invite emails cover notification feel)
 - Recurring events, multi-group membership UX, roles/permissions
