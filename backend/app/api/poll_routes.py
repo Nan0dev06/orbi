@@ -3,11 +3,20 @@
 GET  /groups/{group_id}/polls      -> polls for a group (newest first)
 POST /polls/{poll_id}/vote         {"yes": true}  -> updated poll state
 
-Voting re-evaluates the decision rule immediately, so the returned poll
-carries its up-to-date status (open/approved/rejected).
+Voting re-evaluates the decision rule immediately. THE AUTONOMOUS PART of the
+propose -> poll -> observe -> commit/re-plan loop lives here: the vote that
+flips a poll's status triggers the follow-through on the spot —
+  open -> approved : the event is booked to every member's calendar (safe by
+                     construction: approval requires zero NO votes)
+  open -> rejected : fresh alternative slots are computed immediately so the
+                     re-plan is already waiting for the group
+Each auto action is logged under the same orbi.agent logger as the tool calls,
+so the whole decision loop is visible in one log stream.
 """
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,10 +24,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.db.models import Poll, User
+from app.db.models import Group, Poll, User
 from app.db import repo
 from app.db.session import get_session
 from app.tools.poll_service import refresh_poll_status
+
+log = logging.getLogger("orbi.agent")
 
 router = APIRouter(tags=["polls"])
 
@@ -77,5 +88,50 @@ def vote(
         raise HTTPException(status_code=400, detail=f"Poll is {poll.status}; voting is closed.")
     if poll.booked:
         raise HTTPException(status_code=400, detail="Poll is already booked.")
+
+    was_open = poll.status == "open"
     repo.cast_vote(session, poll, user, body.yes)
-    return _poll_json(session, poll, user.timezone)
+    out = _poll_json(session, poll, user.timezone)  # refreshes status via the rule
+
+    # ---- autonomous follow-through on a status transition ----
+    if was_open and poll.status == "approved" and not poll.booked:
+        out["auto"] = _auto_book(session, poll)
+    elif was_open and poll.status == "rejected":
+        out["auto"] = _auto_replan(session, poll, user.timezone)
+    out["booked"] = poll.booked
+    out["event_link"] = poll.event_link
+    return out
+
+
+def _auto_book(session: Session, poll: Poll) -> dict:
+    """Approved (zero NOs + enough YESes) -> commit to everyone's calendar now."""
+    from app.tools.booking import book_poll_event
+
+    organizer = session.get(User, poll.created_by)
+    members = repo.get_group_members(session, poll.group_id)
+    log.info("[decision] poll %d approved by rule -> auto-booking for %d members",
+             poll.id, len(members))
+    result = book_poll_event(session, poll, organizer, [m.email for m in members])
+    if result.get("booked"):
+        return {"action": "booked", "event_link": result["event_link"]}
+    log.warning("[decision] poll %d auto-book failed: %s", poll.id, result.get("error"))
+    return {"action": "book_failed", "error": result.get("error")}
+
+
+def _auto_replan(session: Session, poll: Poll, tz_name: str) -> dict:
+    """Rejected (someone said no) -> never book; compute the next options now."""
+    from app.agent.availability import compute_availability
+
+    group = session.get(Group, poll.group_id)
+    duration = max(15, int((poll.end - poll.start).total_seconds() // 60))
+    log.info("[decision] poll %d rejected by rule -> auto re-planning (%d min)",
+             poll.id, duration)
+    avail = compute_availability(
+        session, group, datetime.now(timezone.utc), days_ahead=7,
+        duration_minutes=duration, tz_name=tz_name,
+    )
+    alts = avail.get("common_slots", [])[:3]
+    log.info("[decision] poll %d re-plan -> %d alternative slot(s)", poll.id, len(alts))
+    return {"action": "replan", "alternative_slots": alts,
+            "note": "This slot was declined; here are the next common windows. "
+                    "Ask Orbi to poll one of them."}

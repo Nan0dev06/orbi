@@ -3,9 +3,10 @@
 The agent's full toolbox:
 - get_group_members  — resolve the group and who has connected a calendar
 - find_meeting_slots — live freebusy + intersection + reasonable-hours filter
+- suggest_venues     — location-anchored REAL venue search (Phase 4)
 - create_poll        — propose a confirmed slot to the group (Phase 3)
-- get_poll_status    — tallies + the decision rule's verdict (Phase 3)
-- book_meeting       — write an APPROVED poll to everyone's calendar (Phase 3)
+- get_poll_status    — tallies + rule verdict + auto re-plan alternatives (Phase 3)
+- book_meeting       — manual fallback: book an APPROVED poll (Phase 3)
 
 Each tool logs its invocation so the agent loop is visible in the server log
 (the "show the judges the loop" requirement).
@@ -46,6 +47,27 @@ TOOL_SCHEMAS = [
             "checking availability. Takes no arguments."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "suggest_venues",
+        "description": (
+            "Suggest REAL venues near where the group will actually be around a "
+            "candidate slot. Reads only the location fields members typed into "
+            "their own adjacent events (never titles), anchors a midpoint, and "
+            "searches OpenStreetMap for real named places. Venues you mention "
+            "MUST come from this tool's results — if it returns none, say so "
+            "honestly. Call it AFTER you have a candidate slot the user likes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso": {"type": "string", "description": "Candidate slot start, ISO 8601 with offset (from find_meeting_slots)."},
+                "end_iso": {"type": "string", "description": "Candidate slot end, ISO 8601 with offset."},
+                "kind": {"type": "string", "enum": ["cafe", "restaurant", "bar", "fast_food"],
+                         "description": "What kind of place (default cafe)."},
+            },
+            "required": ["start_iso", "end_iso"],
+        },
     },
     {
         "name": "create_poll",
@@ -174,6 +196,45 @@ def _find_meeting_slots(ctx: ToolContext, args: dict) -> dict:
     )
 
 
+def _parse_slot(args: dict) -> tuple[datetime, datetime] | dict:
+    """Shared ISO parsing for tools that take start_iso/end_iso."""
+    try:
+        start = datetime.fromisoformat(args["start_iso"])
+        end = datetime.fromisoformat(args["end_iso"])
+    except (KeyError, ValueError) as e:
+        return {"error": f"Bad ISO datetime: {e}"}
+    if start.tzinfo is None or end.tzinfo is None:
+        return {"error": "Datetimes must include a timezone offset (use start_iso/end_iso from find_meeting_slots)."}
+    if end <= start:
+        return {"error": "Slot end must be after start."}
+    return start, end
+
+
+def _suggest_venues(ctx: ToolContext, args: dict) -> dict:
+    if ctx.group is None:
+        return {"error": "The user is not in a group yet."}
+    from app.auth.google import credentials_from_json
+    from app.tools.locations import suggest_venues_for_slot
+
+    slot = _parse_slot(args)
+    if isinstance(slot, dict):
+        return slot
+    start, end = slot
+
+    members_with_creds = []
+    for m in repo.get_group_members(ctx.session, ctx.group.id):
+        if not m.calendar_connected:
+            continue
+        creds, refreshed = credentials_from_json(m.token_json)
+        if refreshed:
+            repo.set_user_token(ctx.session, m, refreshed)
+        members_with_creds.append((m.email, creds))
+
+    return suggest_venues_for_slot(
+        members_with_creds, start, end, kind=args.get("kind", "cafe")
+    )
+
+
 def _create_poll(ctx: ToolContext, args: dict) -> dict:
     if ctx.group is None:
         return {"error": "The user is not in a group yet."}
@@ -204,13 +265,13 @@ def _create_poll(ctx: ToolContext, args: dict) -> dict:
     }
 
 
-def _poll_json(ctx: ToolContext, poll) -> dict:
+def _poll_json(ctx: ToolContext, poll, with_alternatives: bool = False) -> dict:
     from app.tools.poll_service import refresh_poll_status
     from zoneinfo import ZoneInfo
 
     decision = refresh_poll_status(ctx.session, poll)
     tz = ZoneInfo(ctx.tz_name)
-    return {
+    out = {
         "poll_id": poll.id,
         "title": poll.title,
         "slot": f"{poll.start.astimezone(tz):%a %d %b %H:%M} - {poll.end.astimezone(tz):%H:%M} ({ctx.tz_name})",
@@ -222,6 +283,20 @@ def _poll_json(ctx: ToolContext, poll) -> dict:
         "waiting_on": decision.missing_voters,
         "rule_says": decision.reason,
     }
+    # RE-PLAN branch: a rejected poll comes back with live alternative slots so
+    # the agent can immediately propose the next option instead of stopping.
+    if with_alternatives and poll.status == "rejected":
+        from app.agent.availability import compute_availability
+
+        duration = max(15, int((poll.end - poll.start).total_seconds() // 60))
+        avail = compute_availability(
+            ctx.session, ctx.group, ctx.now_utc, days_ahead=7,
+            duration_minutes=duration, tz_name=ctx.tz_name,
+        )
+        out["alternative_slots"] = avail.get("common_slots", [])[:3]
+        out["replan_note"] = ("This slot was declined. Offer one of "
+                              "alternative_slots to the user as the next proposal.")
+    return out
 
 
 def _get_poll_status(ctx: ToolContext, args: dict) -> dict:
@@ -231,9 +306,12 @@ def _get_poll_status(ctx: ToolContext, args: dict) -> dict:
         poll = repo.get_poll(ctx.session, args["poll_id"])
         if poll is None or poll.group_id != ctx.group.id:
             return {"error": f"No poll {args['poll_id']} in this group."}
-        return _poll_json(ctx, poll)
+        return _poll_json(ctx, poll, with_alternatives=True)
     polls = repo.get_group_polls(ctx.session, ctx.group.id)[:5]
-    return {"polls": [_poll_json(ctx, p) for p in polls]} if polls else {
+    # alternatives only for the most recent poll — each computation hits live
+    # freebusy for the whole group, so don't do it five times per status check
+    return {"polls": [_poll_json(ctx, p, with_alternatives=(i == 0))
+                      for i, p in enumerate(polls)]} if polls else {
         "polls": [], "note": "No polls yet in this group."}
 
 
@@ -254,6 +332,7 @@ def _book_meeting(ctx: ToolContext, args: dict) -> dict:
 _DISPATCH = {
     "get_group_members": _get_group_members,
     "find_meeting_slots": _find_meeting_slots,
+    "suggest_venues": _suggest_venues,
     "create_poll": _create_poll,
     "get_poll_status": _get_poll_status,
     "book_meeting": _book_meeting,

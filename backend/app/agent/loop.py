@@ -58,6 +58,31 @@ def _openai_tools() -> list[dict]:
     ]
 
 
+def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 3):
+    """One chat-completion call, retried on Groq's stochastic tool-call
+    failures. Llama occasionally emits malformed function-call syntax; Groq
+    then 400s with code 'tool_use_failed'. A fresh sample almost always
+    succeeds, so retrying beats failing the whole turn."""
+    from openai import BadRequestError
+
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                tools=_openai_tools(),
+                max_tokens=1024,
+            )
+        except BadRequestError as exc:
+            if "tool_use_failed" not in str(exc):
+                raise
+            last_exc = exc
+            log.warning("[loop] malformed tool call from model (attempt %d/%d) — retrying",
+                        attempt + 1, attempts)
+    raise last_exc
+
+
 def run_agent(ctx: ToolContext, history: list[dict], user_message: str) -> AgentResult:
     """Run one turn of Orbi. `history` is prior [{"role","content"}] messages
     (plain strings; not mutated — the caller decides what to persist)."""
@@ -85,12 +110,7 @@ def run_agent(ctx: ToolContext, history: list[dict], user_message: str) -> Agent
     trace: list[TraceStep] = []
 
     for step in range(MAX_STEPS):
-        resp = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            tools=_openai_tools(),
-            max_tokens=1024,
-        )
+        resp = _create_with_retry(client, messages)
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
