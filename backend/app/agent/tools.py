@@ -3,10 +3,11 @@
 The agent's full toolbox:
 - get_group_members  — resolve the group and who has connected a calendar
 - find_meeting_slots — live freebusy + intersection + reasonable-hours filter
-- suggest_venues     — location-anchored REAL venue search (Phase 4)
-- create_poll        — propose a confirmed slot to the group (Phase 3)
-- get_poll_status    — tallies + rule verdict + auto re-plan alternatives (Phase 3)
-- book_meeting       — manual fallback: book an APPROVED poll (Phase 3)
+- suggest_venues     — location-anchored REAL venue search
+- create_plan        — put a plan (place + day + candidate times) to the group
+- get_plan_status    — the host's decision box: who's in, out, and in/out on the time
+- use_next_time      — host move: this time didn't work, ask the cohort the next one
+- lock_in_time       — host move: commit the active time, booking its yes-voters
 
 Each tool logs its invocation so the agent loop is visible in the server log
 (the "show the judges the loop" requirement).
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.agent.availability import compute_availability
 from app.db.models import Group, User
 from app.db import repo
+from app.tools.plan_service import day_label, time_label
 
 log = logging.getLogger("orbi.agent")
 
@@ -70,56 +72,91 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "create_poll",
+        "name": "create_plan",
         "description": (
-            "Propose a specific meeting slot to the group as a yes/no poll. Only "
-            "call this AFTER the user has confirmed the slot you proposed. Use the "
-            "start_iso/end_iso values returned by find_meeting_slots verbatim. "
-            "min_yes defaults to the full member count (unanimous) unless the user "
-            "asked for a lower threshold."
+            "Put a plan to the group: one place, one day, and an ORDERED list of "
+            "candidate times to try (e.g. 5 PM first, then 7 PM as the fallback). "
+            "This starts a two-stage cascade: every member is first asked whether "
+            "they're in for the plan at all, and only the people who say yes are "
+            "then asked about the first time. Only call this AFTER the user has "
+            "confirmed the place, the day, and the times with you — never guess "
+            "them. Use start_iso/end_iso values from find_meeting_slots verbatim."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "Short event title, e.g. 'Coffee catch-up'."},
-                "start_iso": {"type": "string", "description": "Slot start, ISO 8601 with offset."},
-                "end_iso": {"type": "string", "description": "Slot end, ISO 8601 with offset."},
-                "location": {"type": "string", "description": "Optional meeting place."},
-                "min_yes": {"type": "integer", "minimum": 1,
-                            "description": "Minimum YES votes required (default: all members)."},
+                "location": {"type": "string", "description": "Where the hangout is, e.g. 'Cafe Younes, Hamra'."},
+                "times": {
+                    "type": "array",
+                    "description": (
+                        "Candidate times IN PREFERENCE ORDER, all on the same day. "
+                        "The first is asked immediately; the rest are held back and "
+                        "only used if the host decides to move on from the first."
+                    ),
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_iso": {"type": "string", "description": "Slot start, ISO 8601 with offset."},
+                            "end_iso": {"type": "string", "description": "Slot end, ISO 8601 with offset."},
+                        },
+                        "required": ["start_iso", "end_iso"],
+                    },
+                },
             },
-            "required": ["title", "start_iso", "end_iso"],
+            "required": ["title", "times"],
         },
     },
     {
-        "name": "get_poll_status",
+        "name": "get_plan_status",
         "description": (
-            "Check the group's polls and their vote tallies. Re-evaluates the "
-            "decision rule (any NO = rejected; enough YES and zero NO = approved; "
-            "otherwise pending). Call this when the user asks how a poll is going, "
-            "or before booking."
+            "The host's decision box for a plan: who is in for the plan, who is "
+            "out, who hasn't answered, and — for the time currently being asked — "
+            "who can make it, who can't, and who is silent. Nothing here decides "
+            "anything: relay it to the host and let THEM choose between locking "
+            "the time in and moving to the next one. Call it when the user asks "
+            "how the plan is going."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "poll_id": {"type": "integer", "description": "Specific poll; omit for all recent polls."},
+                "plan_id": {"type": "integer", "description": "Specific plan; omit for all recent plans."},
             },
             "required": [],
         },
     },
     {
-        "name": "book_meeting",
+        "name": "use_next_time",
         "description": (
-            "Write an APPROVED poll's event to Google Calendar: every member gets "
-            "the event + Google's invite email. Only works when the poll is "
-            "approved — never call it for pending or rejected polls."
+            "HOST MOVE — the current time didn't work out, so drop it and ask the "
+            "next candidate time instead. Everyone who said they're in for the "
+            "plan gets asked the new time, including people who were fine with the "
+            "old one (a different hour is a different question). Only call this "
+            "when the host has explicitly said to move on. If no candidate times "
+            "are left the plan closes and you should search for fresh ones."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "poll_id": {"type": "integer"},
-            },
-            "required": ["poll_id"],
+            "properties": {"plan_id": {"type": "integer"}},
+            "required": ["plan_id"],
+        },
+    },
+    {
+        "name": "lock_in_time",
+        "description": (
+            "HOST MOVE — commit the time currently being asked and put it on the "
+            "calendar. ONLY the members who said that time works get the event and "
+            "Google's invite email. Only call this when the host has explicitly "
+            "said to go ahead with this time — never on your own judgement, never "
+            "because the numbers look good, and never while people are still "
+            "silent unless the host says so anyway."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"plan_id": {"type": "integer"}},
+            "required": ["plan_id"],
         },
     },
     {
@@ -235,107 +272,116 @@ def _suggest_venues(ctx: ToolContext, args: dict) -> dict:
     )
 
 
-def _create_poll(ctx: ToolContext, args: dict) -> dict:
+def _create_plan(ctx: ToolContext, args: dict) -> dict:
     if ctx.group is None:
         return {"error": "The user is not in a group yet."}
-    try:
-        start = datetime.fromisoformat(args["start_iso"])
-        end = datetime.fromisoformat(args["end_iso"])
-    except ValueError as e:
-        return {"error": f"Bad ISO datetime: {e}"}
-    if start.tzinfo is None or end.tzinfo is None:
-        return {"error": "Datetimes must include a timezone offset (use start_iso/end_iso from find_meeting_slots)."}
-    if end <= start:
-        return {"error": "Slot end must be after start."}
+    raw_times = args.get("times") or []
+    if not raw_times:
+        return {"error": "A plan needs at least one candidate time."}
 
-    members = repo.get_group_members(ctx.session, ctx.group.id)
-    min_yes = args.get("min_yes") or len(members)
-    poll = repo.create_poll(
+    slots = []
+    for t in raw_times:
+        parsed = _parse_slot(t)
+        if isinstance(parsed, dict):
+            return parsed
+        start, end = parsed
+        slots.append((start.astimezone(timezone.utc), end.astimezone(timezone.utc)))
+    slots.sort(key=lambda s: s[0])  # the queue is walked in chronological order
+
+    plan = repo.create_plan(
         ctx.session, ctx.group, ctx.user,
         title=args["title"],
-        slot_start_utc=start.astimezone(timezone.utc),
-        slot_end_utc=end.astimezone(timezone.utc),
-        min_yes=min(min_yes, len(members)),
+        slots=slots,
         location=args.get("location"),
     )
-    return {
-        "poll_id": poll.id, "title": poll.title, "status": poll.status,
-        "min_yes": poll.min_yes, "members_to_vote": [m.email for m in members],
-        "note": "Poll created. Members vote yes/no in the app; check with get_poll_status.",
-    }
-
-
-def _poll_json(ctx: ToolContext, poll, with_alternatives: bool = False) -> dict:
-    from app.tools.poll_service import refresh_poll_status
-    from zoneinfo import ZoneInfo
-
-    decision = refresh_poll_status(ctx.session, poll)
-    tz = ZoneInfo(ctx.tz_name)
-    out = {
-        "poll_id": poll.id,
-        "title": poll.title,
-        "slot": f"{poll.start.astimezone(tz):%a %d %b %H:%M} - {poll.end.astimezone(tz):%H:%M} ({ctx.tz_name})",
-        "status": poll.status,
-        "booked": poll.booked,
-        "event_link": poll.event_link,
-        "yes": decision.yes_count, "no": decision.no_count,
-        "min_yes": poll.min_yes,
-        "waiting_on": decision.missing_voters,
-        "rule_says": decision.reason,
-    }
-    # RE-PLAN branch: a rejected poll comes back with live alternative slots so
-    # the agent can immediately propose the next option instead of stopping.
-    if with_alternatives and poll.status == "rejected":
-        from app.agent.availability import compute_availability
-
-        duration = max(15, int((poll.end - poll.start).total_seconds() // 60))
-        avail = compute_availability(
-            ctx.session, ctx.group, ctx.now_utc, days_ahead=7,
-            duration_minutes=duration, tz_name=ctx.tz_name,
-        )
-        out["alternative_slots"] = avail.get("common_slots", [])[:3]
-        out["replan_note"] = ("This slot was declined. Offer one of "
-                              "alternative_slots to the user as the next proposal.")
-    return out
-
-
-def _get_poll_status(ctx: ToolContext, args: dict) -> dict:
-    if ctx.group is None:
-        return {"error": "The user is not in a group yet."}
-    if args.get("poll_id"):
-        poll = repo.get_poll(ctx.session, args["poll_id"])
-        if poll is None or poll.group_id != ctx.group.id:
-            return {"error": f"No poll {args['poll_id']} in this group."}
-        return _poll_json(ctx, poll, with_alternatives=True)
-    polls = repo.get_group_polls(ctx.session, ctx.group.id)[:5]
-    # alternatives only for the most recent poll — each computation hits live
-    # freebusy for the whole group, so don't do it five times per status check
-    return {"polls": [_poll_json(ctx, p, with_alternatives=(i == 0))
-                      for i, p in enumerate(polls)]} if polls else {
-        "polls": [], "note": "No polls yet in this group."}
-
-
-def _book_meeting(ctx: ToolContext, args: dict) -> dict:
-    if ctx.group is None:
-        return {"error": "The user is not in a group yet."}
-    from app.tools.booking import book_poll_event
-    from app.tools.poll_service import refresh_poll_status
-
-    poll = repo.get_poll(ctx.session, args["poll_id"])
-    if poll is None or poll.group_id != ctx.group.id:
-        return {"error": f"No poll {args['poll_id']} in this group."}
-    refresh_poll_status(ctx.session, poll)  # make status current before booking
     members = repo.get_group_members(ctx.session, ctx.group.id)
-    return book_poll_event(ctx.session, poll, ctx.user, [m.email for m in members])
+    active = repo.get_active_round(ctx.session, plan)
+    log.info("[plan %d] created by %s: %d candidate time(s), asked %d member(s)",
+             plan.id, ctx.user.email, len(slots), len(members))
+    return {
+        "plan_id": plan.id,
+        "title": plan.title,
+        "location": plan.location,
+        "day": day_label(plan, ctx.tz_name),
+        "asked": [m.email for m in members],
+        "first_time": time_label(active, ctx.tz_name) if active else None,
+        "times_held_back": [time_label(r, ctx.tz_name) for r in plan.rounds[1:]],
+        "note": ("Everyone was asked if they're in for the plan itself. Whoever says "
+                 "yes gets asked about the first time straight away. Nothing books "
+                 "until the host says so — report back and let them decide."),
+    }
+
+
+def _plan_json(ctx: ToolContext, plan) -> dict:
+    from app.tools.plan_service import plan_tally
+
+    t = plan_tally(ctx.session, plan, ctx.tz_name)
+    active = repo.get_active_round(ctx.session, plan)
+    return {
+        "plan_id": plan.id,
+        "title": plan.title,
+        "location": plan.location,
+        "day": day_label(plan, ctx.tz_name),
+        "status": plan.status,
+        "you_are_host": ctx.user.id == plan.created_by,
+        "in_for_the_plan": t.interested,
+        "out_of_the_plan": t.not_interested,
+        "no_answer_on_the_plan": t.no_interest_answer,
+        "time_being_asked": time_label(active, ctx.tz_name) if active else None,
+        "can_make_it": t.time_yes,
+        "cannot_make_it": t.time_no,
+        "silent_on_this_time": t.time_waiting,
+        "times_left_to_try": [time_label(r, ctx.tz_name)
+                              for r in plan.rounds if r.status == "queued"],
+        "booked_link": next((r.event_link for r in plan.rounds if r.booked), None),
+        "host_box": t.host_note,
+    }
+
+
+def _get_plan_status(ctx: ToolContext, args: dict) -> dict:
+    if ctx.group is None:
+        return {"error": "The user is not in a group yet."}
+    if args.get("plan_id"):
+        plan = repo.get_plan(ctx.session, args["plan_id"])
+        if plan is None or plan.group_id != ctx.group.id:
+            return {"error": f"No plan {args['plan_id']} in this group."}
+        return _plan_json(ctx, plan)
+    plans = repo.get_group_plans(ctx.session, ctx.group.id)[:5]
+    if not plans:
+        return {"plans": [], "note": "No plans yet in this group."}
+    return {"plans": [_plan_json(ctx, p) for p in plans]}
+
+
+def _host_move(ctx: ToolContext, args: dict, fn) -> dict:
+    """Shared guard for the two host-only moves."""
+    if ctx.group is None:
+        return {"error": "The user is not in a group yet."}
+    plan = repo.get_plan(ctx.session, args["plan_id"])
+    if plan is None or plan.group_id != ctx.group.id:
+        return {"error": f"No plan {args['plan_id']} in this group."}
+    return fn(ctx.session, plan, ctx.user, ctx.tz_name)
+
+
+def _use_next_time(ctx: ToolContext, args: dict) -> dict:
+    from app.tools.plan_service import advance_to_next_time
+
+    return _host_move(ctx, args, advance_to_next_time)
+
+
+def _lock_in_time(ctx: ToolContext, args: dict) -> dict:
+    from app.tools.plan_service import confirm_active_time
+
+    return _host_move(ctx, args, confirm_active_time)
 
 
 _DISPATCH = {
     "get_group_members": _get_group_members,
     "find_meeting_slots": _find_meeting_slots,
     "suggest_venues": _suggest_venues,
-    "create_poll": _create_poll,
-    "get_poll_status": _get_poll_status,
-    "book_meeting": _book_meeting,
+    "create_plan": _create_plan,
+    "get_plan_status": _get_plan_status,
+    "use_next_time": _use_next_time,
+    "lock_in_time": _lock_in_time,
 }
 
 

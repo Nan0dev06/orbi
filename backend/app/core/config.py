@@ -54,7 +54,7 @@ LLM_API_KEY = os.getenv("LLM_API_KEY") or GROQ_API_KEY or "ollama"
 # Both scopes requested up front so test accounts consent once and we never
 # have to re-run OAuth when Phase 3 starts writing events.
 #   calendar.readonly -> freebusy queries + reading locations on own events
-#   calendar.events   -> creating the group event after an approved poll
+#   calendar.events   -> creating the group event after the host locks in a time
 OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",

@@ -19,6 +19,13 @@
   .muted { color: #8a90b8; font-size: 0.85rem; }
   .member { padding: 4px 0; font-size: 0.9rem; }
   .ok { color: #7ee787; } .warn { color: #f0b45e; }
+  .ask { background: #10132a; border-radius: 8px; padding: 10px; font-size: 0.9rem; line-height: 1.5; }
+  .ask button { margin-top: 8px; margin-right: 6px; }
+  .hostbox { background: #201a33; border-left: 3px solid #8f9bff; border-radius: 6px;
+             padding: 10px; margin-top: 8px; font-size: 0.85rem; line-height: 1.5; }
+  .time { color: #667; }
+  .time.active { color: #b9c2ff; } .time.confirmed { color: #7ee787; }
+  .time.skipped { text-decoration: line-through; }
 
   /* Orbi orb + chat panel */
   #orb { position: fixed; right: 24px; bottom: 24px; width: 64px; height: 64px; border-radius: 50%;
@@ -53,9 +60,9 @@
     <div id="groupbody"></div>
   </div>
 
-  <div class="card" id="pollcard" style="display:none">
-    <h2>Polls</h2>
-    <div id="pollbody" class="muted">No polls yet — ask Orbi to propose a time.</div>
+  <div class="card" id="plancard" style="display:none">
+    <h2>Plans</h2>
+    <div id="planbody" class="muted">No plans yet — ask Orbi to suggest a hangout.</div>
   </div>
 </div>
 
@@ -102,33 +109,72 @@ async function renderGroup() {
     ${members.map(m => `<div class="member">${m.email}
       <span class="${m.calendar_connected ? "ok" : "warn"}">
         ${m.calendar_connected ? "✓" : "no calendar"}</span></div>`).join("")}`;
-  $("pollcard").style.display = "";
-  renderPolls();
+  $("plancard").style.display = "";
+  renderPlans();
 }
 
-async function renderPolls() {
-  const polls = await api(`/groups/${group.id}/polls`);
-  if (!polls.length) return;
-  $("pollbody").innerHTML = polls.map(p => `
-    <div class="member" style="margin-bottom:8px">
-      <b>${p.title}</b> — ${p.start_local} → ${p.end_local}
-      ${p.location ? `<span class="muted">@ ${p.location}</span>` : ""}<br>
-      <span class="muted">${p.yes} yes / ${p.no} no (needs ${p.min_yes} yes) —
-        <b class="${p.status === "approved" ? "ok" : p.status === "rejected" ? "warn" : ""}">${p.status}</b>
-        ${p.booked ? ` · <a href="${p.event_link}" target="_blank" style="color:#7ee787">booked ✓</a>` : ""}
-      </span>
-      ${p.status === "open" && !p.booked ? `
-        <span style="margin-left:8px">
-          <button onclick="votePoll(${p.id}, true)">Yes</button>
-          <button onclick="votePoll(${p.id}, false)" style="background:#7a3a4a">No</button>
-        </span>` : ""}
-    </div>`).join("");
+// The two-stage cascade, as the member experiences it: you're asked about the
+// plan first, and only your own yes opens the time question — no waiting on
+// anyone else. `ballot` from the API says which question you're on right now.
+function renderBallot(p) {
+  const b = p.ballot;
+  if (b.stage === "interest")
+    return `<div class="ask"><b>${p.host}</b> suggested ${p.title}
+      ${p.location ? `at <b>${p.location}</b>` : ""} on <b>${p.day}</b>. Are you in?
+      <span class="muted">(the time comes next)</span><br>
+      <button onclick="voteInterest(${p.id}, true)">I'm in</button>
+      <button onclick="voteInterest(${p.id}, false)" style="background:#7a3a4a">Not this one</button>
+    </div>`;
+  if (b.stage === "time")
+    return `<div class="ask">You're in. Does <b>${b.time_label}</b> work for you?<br>
+      <button onclick="voteTime(${p.id}, ${b.round_id}, true)">That works</button>
+      <button onclick="voteTime(${p.id}, ${b.round_id}, false)" style="background:#7a3a4a">Not then</button>
+    </div>`;
+  return `<div class="muted">${b.note}</div>`;
 }
 
-window.votePoll = async (id, yes) => {
-  try { await api(`/polls/${id}/vote`, { method: "POST", body: JSON.stringify({ yes }) }); }
+// Only the host sees this, and it is the only place a decision gets made —
+// they read it and tell Orbi to lock the time in or move to the next one.
+function renderHostBox(p) {
+  if (!p.host_box) return "";
+  return `<div class="hostbox"><b class="muted">Your call (you suggested this)</b><br>
+    ${p.host_box.note}
+    <div class="muted" style="margin-top:6px">Tell Orbi what to do.</div></div>`;
+}
+
+async function renderPlans() {
+  const plans = await api(`/groups/${group.id}/plans`);
+  if (!plans.length) return;
+  $("planbody").innerHTML = plans.map(p => {
+    const booked = p.times.find(t => t.booked);
+    return `<div class="member" style="margin-bottom:12px">
+      <b>${p.title}</b> <span class="muted">${p.day}${p.location ? ` @ ${p.location}` : ""}</span>
+      <b class="${p.status === "scheduled" ? "ok" : p.status === "dead" ? "warn" : ""}">
+        ${p.status === "open" ? "" : `· ${p.status}`}</b>
+      ${booked ? ` · <a href="${booked.event_link}" target="_blank" style="color:#7ee787">booked ✓</a>` : ""}
+      <div class="muted" style="margin:4px 0">${p.times.map(t =>
+        `<span class="time ${t.status}">${t.label}${
+          t.status === "active" ? " ← being asked" :
+          t.status === "skipped" ? " (dropped)" :
+          t.status === "confirmed" ? " ✓" : " (held back)"}</span>`).join(" · ")}</div>
+      ${p.status === "open" ? renderBallot(p) : ""}
+      ${renderHostBox(p)}
+    </div>`;
+  }).join("");
+}
+
+window.voteInterest = async (id, yes) => {
+  try { await api(`/plans/${id}/interest`, { method: "POST", body: JSON.stringify({ yes }) }); }
   catch (e) { alert(e); }
-  renderPolls();
+  renderPlans();  // a yes re-renders straight into the time question
+};
+
+window.voteTime = async (id, round_id, yes) => {
+  try {
+    await api(`/plans/${id}/time-vote`, { method: "POST",
+      body: JSON.stringify({ yes, round_id }) });
+  } catch (e) { alert(e); }
+  renderPlans();
 };
 
 window.createGroup = async () => {
