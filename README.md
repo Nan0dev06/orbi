@@ -12,14 +12,15 @@ Orbi cross-references everyone's live availability, proposes a time and venue wi
 
 > ## Status — July 2026
 >
-> **Phases 1–3 are complete and verified end-to-end**: live `freebusy` across real
-> Google Calendars → common-slot intersection → in-app plan cascade → the host's
-> decision → a **real booking** written to the calendar of everyone who's coming.
+> **All four phases are complete and verified end-to-end**: live `freebusy` across
+> real Google Calendars → common-slot intersection → real venue suggestions →
+> in-app plan cascade → the host's decision → a **real booking** written to the
+> calendar of everyone who's coming.
 >
 > - **Live deployment:** <https://orbi-1jgh.onrender.com> (Render free tier — the
 >   first request after it's been idle can take ~50s to wake up).
-> - **Model:** Llama 3.3 70B on Groq's free tier (no paid APIs anywhere).
-> - **Remaining:** Phase 4 (venue suggestions) is the only optional piece left.
+> - **Model:** Llama 3.3 70B on Groq's free tier.
+> - **No paid APIs anywhere**, including venues: OpenStreetMap needs no key.
 
 ---
 
@@ -56,23 +57,17 @@ Every turn, the backend injects into the model's context:
 
 ### Tools
 
-Built and wired into the agent (Phases 1–3):
+All seven are built and wired into the agent:
 
 | Tool | What it does |
 |---|---|
 | `get_group_members` | Resolve the user's group → member list + calendar connection status |
 | `find_meeting_slots` | Live `freebusy.query` for all members, then intersect busy blocks → common free windows, filtered to reasonable local hours and the requested duration. Returns **only busy time ranges** — never titles or details. The intersection math is a pure, unit-tested function |
+| `suggest_venues` | Reads the locations members typed into their *own* events near the slot → geocodes them → anchors on the centroid → searches for **real** named places nearby. Venues come only from this call; if it returns nothing, Orbi says so. **It never invents a venue** |
 | `create_plan` | Put a plan — place, day, and an ordered queue of candidate times — to the group, starting the cascade |
 | `get_plan_status` | The host's decision box: who's in, who's out, who's silent, and for the time being asked, who can and can't make it |
 | `use_next_time` | **Host move.** Drop the current time and ask the next candidate — to everyone who's in, including those who liked the old one |
 | `lock_in_time` | **Host move.** Commit the current time and write it to the calendars of **only** the members who said that time works |
-
-Planned for Phase 4 (venue suggestions, not yet built):
-
-| Tool | What it will do |
-|---|---|
-| `get_event_locations` | Locations users explicitly typed into their own events adjacent to a candidate slot → geographic anchor |
-| `search_venues` | Real Places API call near the anchor. No results → Orbi says so. **It never invents a venue** |
 
 ### The decision loop (propose → cascade → host decides → commit or try the next time)
 
@@ -128,6 +123,34 @@ Orbi reports the tally; the host chooses:
 The cascade lives in `tools/plan_rules.py` as pure, unit-tested functions that
 only *report*; `tools/plan_service.py` is the single place state transitions.
 
+### The host's report
+
+The host doesn't have to go looking for the tally — Orbi pushes it. When a vote
+lands, a report pops up on the host's screen showing **every member on both
+questions** (in / out / silent for the plan; can / can't / silent for the time
+being asked) and the two moves available, each spelling out its consequence
+first — who gets left off the invite, and who gets re-asked:
+
+```
+Coffee at the usual · Monday 20 July @ Cafe Younes
+
+Who's in for the plan          Mon 20 Jul 17:00-18:00
+  In:      sam, bea, dia         Can make it:     bea
+  Not in:  cal                   Can't make it:   dia
+  Silent:  —                     Silent:          sam
+
+[Go ahead with 17:00 (1)]  [Try 19:00 instead]  [Not yet]
+
+Going ahead invites only the 1 who said 17:00 works. dia won't be invited.
+Trying 19:00 asks everyone who's in again, including bea.
+```
+
+Only the host ever sees it — the API omits the tally entirely for everyone else,
+so a member cannot see how anyone voted. The buttons **say it to Orbi in words**
+rather than calling a booking endpoint, so the agent stays the single path to a
+calendar and the host guard lives in one place. Dismissing it keeps it shut until
+somebody actually votes again.
+
 ## Privacy by Architecture
 
 This is a design principle, not a feature:
@@ -147,7 +170,7 @@ Orbi does group scheduling and meetup planning. Nothing else. Asked to write an 
 | Backend | Python 3.11+, FastAPI |
 | Agent | Llama 3.3 70B via Groq (free tier) with native tool calling; Ollama/OpenAI swappable via `LLM_PROVIDER` |
 | Calendar | Google Calendar API — OAuth 2.0, `calendar.readonly` + `calendar.events` scopes, `freebusy.query` |
-| Venues | Google Places API (Phase 4) |
+| Venues | OpenStreetMap — Nominatim (geocoding) + Overpass (venue search). Free, **no API key**, no account |
 | Frontend | React (teammate's branch). Backend exposes a documented REST API with example request/response bodies for every endpoint. A minimal scaffold UI ships in `backend/app/static/` for testing |
 | Storage | **SQLite** locally, **Postgres** in production — auto-selected by the `DATABASE_URL` env var (Render injects it). Same code, no migrations |
 | Hosting | Render (free tier) via a one-click `render.yaml` blueprint that also provisions the Postgres database |
@@ -162,15 +185,17 @@ backend/
     core/config.py     # env-driven settings (one place for all config)
     auth/              # Google OAuth flow + token refresh
     agent/             # agent loop, system prompt, tool definitions
-    tools/             # freebusy, slot intersection, plan cascade rules, booking
+    tools/             # freebusy, slot intersection, venue search, cascade rules, booking
     db/                # SQLAlchemy models + repo + session (users, groups, plans, rounds, votes)
     api/               # REST endpoints (auth, groups, plans, chat)
-    static/            # minimal scaffold UI (Orbi orb + chat)
+    static/            # minimal scaffold UI (Orbi orb + chat + the host's report)
   scripts/
     check_freebusy.py  # Phase 1 CLI proof: OAuth + freebusy + intersection
     check_plan_cascade.py  # Cascade proof: interest → time → host decides → real booking
+    chat_cli.py        # Talk to the agent from the terminal (no UI needed)
     seed_demo.py       # Populate test calendars with realistic Beirut events
     connect_account.py # One-time OAuth connect per test account (CLI)
+    import_tokens.py   # Load existing OAuth tokens into the DB
   tests/               # slot math + plan cascade rule unit tests
 docs/
   api.md               # Endpoint reference with example bodies
@@ -182,7 +207,7 @@ render.yaml            # One-click blueprint: web service + free Postgres
 
 > Detailed steps land with the code. Outline:
 
-1. **Google Cloud project**: enable Calendar API (+ Places API later), create OAuth 2.0 credentials (web application), add test-account emails as test users.
+1. **Google Cloud project**: enable the Calendar API, create OAuth 2.0 credentials (web application), add test-account emails as test users. Venue search needs nothing — OpenStreetMap is keyless.
 2. **Groq API key** (free) from console.groq.com/keys.
 3. Copy `.env.example` → `.env`, fill in `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `GROQ_API_KEY`. Secrets are never committed.
 4. `pip install -r requirements.txt`
@@ -208,7 +233,7 @@ does this automatically) to use Postgres. Full walkthrough in
 | 1 | Google OAuth + freebusy across test accounts + intersection logic, proven via CLI script | ✅ |
 | 2 | Conversational agent + Orbi orb UI: open-ended prompt → candidate slots → reasoning in natural language | ✅ (agent chat needs the free `GROQ_API_KEY`) |
 | 3 | Plan cascade → interest + time votes → host decides → commit to shared calendar or try the next time | ✅ (verified end-to-end incl. a real booking) |
-| 4 | Venue suggestion via Places API (only if time permits) | ⬜ |
+| 4 | Venue suggestion (only if time permits) | ✅ (built on OpenStreetMap instead of Places — free and keyless) |
 | + | **Deployed** to Render with Postgres | ✅ (bonus, beyond the original plan) |
 
 Each phase must work before the next begins.
@@ -220,13 +245,15 @@ Each phase must work before the next begins.
 - **No common slot**: Orbi says so clearly and offers the closest partial options ("4 of 5 are free Thursday 5pm").
 - **Members without a connected calendar**: surfaced explicitly, never silently ignored.
 - **Tool-call logging**: every agent step logged for live debugging and demoing the loop.
+- **A flaky LLM doesn't kill the turn**: Groq rate limits are retried with backoff, and a malformed tool call is handed back to the model as an error it can correct rather than crashing the request.
+- **No raw 500s in chat**: agent, LLM, and DB errors are caught and answered in words.
+- **A failed booking doesn't strand a plan**: if Google refuses or throws, the time reverts to active so the host can retry or move on, instead of sticking in a state that is neither bookable nor skippable.
 
 ## Roadmap / Not Yet Built
 
-Phases 1–3 are built, verified, and deployed; Phase 4 (venues) is the next
-optional step. Beyond that:
+All four phases are built, verified, and deployed. Beyond that:
 
-- Push/real-time notifications (out of scope — the cascade is in-app; Google's own invite emails cover notification feel)
+- **True push** (WebSockets). The host's report currently arrives via short polling while a plan is open, which is enough for in-app use; there are no notifications outside the app, and Google's own invite emails cover the notification feel once something is booked.
 - Recurring events, multi-group membership UX, roles/permissions
 - Preference learning ("Ali never wants Monday mornings")
 - Calendar providers beyond Google
