@@ -95,6 +95,13 @@
 const $ = (id) => document.getElementById(id);
 let me = null, group = null, history = [], shownPlans = [], planTimer = null;
 
+// Escape anything a person can type before it reaches innerHTML. Plan titles,
+// locations and group names are attacker-controlled: a member can ask Orbi for
+// a hangout called `<img src=x onerror=...>` and it would otherwise run in every
+// other member's browser — voting as them, or reading the host's tally.
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 const api = async (path, opts = {}) => {
   const r = await fetch(path, { credentials: "include",
     headers: { "Content-Type": "application/json" }, ...opts });
@@ -104,7 +111,7 @@ const api = async (path, opts = {}) => {
 
 async function boot() {
   try { me = await api("/auth/me"); } catch { return; }  // not logged in
-  $("authbody").innerHTML = `<div class="row"><span>${me.email}</span>
+  $("authbody").innerHTML = `<div class="row"><span>${esc(me.email)}</span>
     <span class="${me.calendar_connected ? "ok" : "warn"}">
       ${me.calendar_connected ? "calendar connected" : "calendar NOT connected"}</span></div>`;
   $("groupcard").style.display = "";
@@ -120,9 +127,9 @@ async function boot() {
 async function renderGroup() {
   const members = await api(`/groups/${group.id}/members`);
   $("groupbody").innerHTML = `
-    <div class="row"><b>${group.name}</b>
-      <span class="muted">invite code: <b>${group.invite_code}</b></span></div>
-    ${members.map(m => `<div class="member">${m.email}
+    <div class="row"><b>${esc(group.name)}</b>
+      <span class="muted">invite code: <b>${esc(group.invite_code)}</b></span></div>
+    ${members.map(m => `<div class="member">${esc(m.email)}
       <span class="${m.calendar_connected ? "ok" : "warn"}">
         ${m.calendar_connected ? "✓" : "no calendar"}</span></div>`).join("")}`;
   $("plancard").style.display = "";
@@ -137,18 +144,18 @@ async function renderGroup() {
 function renderBallot(p) {
   const b = p.ballot;
   if (b.stage === "interest")
-    return `<div class="ask"><b>${p.host}</b> suggested ${p.title}
-      ${p.location ? `at <b>${p.location}</b>` : ""} on <b>${p.day}</b>. Are you in?
+    return `<div class="ask"><b>${esc(p.host)}</b> suggested ${esc(p.title)}
+      ${p.location ? `at <b>${esc(p.location)}</b>` : ""} on <b>${esc(p.day)}</b>. Are you in?
       <span class="muted">(the time comes next)</span><br>
       <button onclick="voteInterest(${p.id}, true)">I'm in</button>
       <button onclick="voteInterest(${p.id}, false)" style="background:#7a3a4a">Not this one</button>
     </div>`;
   if (b.stage === "time")
-    return `<div class="ask">You're in. Does <b>${b.time_label}</b> work for you?<br>
+    return `<div class="ask">You're in. Does <b>${esc(b.time_label)}</b> work for you?<br>
       <button onclick="voteTime(${p.id}, ${b.round_id}, true)">That works</button>
       <button onclick="voteTime(${p.id}, ${b.round_id}, false)" style="background:#7a3a4a">Not then</button>
     </div>`;
-  return `<div class="muted">${b.note}</div>`;
+  return `<div class="muted">${esc(b.note)}</div>`;
 }
 
 // Only the host sees this, and it is the only place a decision gets made —
@@ -169,7 +176,11 @@ function renderHostBox(p) {
 
 const line = (label, who, cls = "muted") =>
   `<div class="tallyrow"><span class="${cls}">${label}</span>
-     <span class="who">${who.length ? who.join(", ") : "—"}</span></div>`;
+     <span class="who">${who.length ? esc(who.join(", ")) : "—"}</span></div>`;
+
+// "Mon 20 Jul 17:00-18:00" -> "17:00-18:00"; the day is already in the header,
+// so the buttons only need the clock part.
+const hhmm = (round) => round.label.split(" ").slice(-1)[0];
 
 // Identity of a tally: changes only when someone actually answers something.
 const tallySig = (p) => {
@@ -191,8 +202,8 @@ function showReport(p) {
   const active = p.times.find(t => t.status === "active");
   const next = p.times.find(t => t.status === "queued");
   $("reportcard").innerHTML = `
-    <h3>${p.title}</h3>
-    <div class="muted" style="margin-bottom:10px">${p.day}${p.location ? ` @ ${p.location}` : ""}</div>
+    <h3>${esc(p.title)}</h3>
+    <div class="muted" style="margin-bottom:10px">${esc(p.day)}${p.location ? ` @ ${esc(p.location)}` : ""}</div>
 
     <b class="muted">Who's in for the plan</b>
     ${line("In:", h.interested, "ok")}
@@ -200,7 +211,7 @@ function showReport(p) {
     ${line("Hasn't answered:", h.no_answer)}
 
     <div class="seg">
-      <b class="muted">${active ? active.label : "No time on the table"}</b>
+      <b class="muted">${active ? esc(active.label) : "No time on the table"}</b>
       ${line("Can make it:", h.time_yes, "ok")}
       ${line("Can't make it:", h.time_no, "warn")}
       ${line("Hasn't answered:", h.time_waiting)}
@@ -208,17 +219,17 @@ function showReport(p) {
 
     <div class="seg actions">
       ${active && h.time_yes.length ? `<button onclick="hostGoAhead(${p.id})">
-        Go ahead with ${active.label.split(" ").slice(-1)[0]} (${h.time_yes.length})</button>` : ""}
+        Go ahead with ${esc(hhmm(active))} (${h.time_yes.length})</button>` : ""}
       ${next ? `<button onclick="hostNextTime(${p.id})" style="background:#7a3a4a">
-        Try ${next.label.split(" ").slice(-1)[0]} instead</button>` : ""}
+        Try ${esc(hhmm(next))} instead</button>` : ""}
       <button onclick="dismissReport()" style="background:#333a5e">Not yet</button>
     </div>
     ${active && h.time_yes.length ? `<div class="muted" style="margin-top:8px">
-      Going ahead invites only the ${h.time_yes.length} who said ${active.label.split(" ").slice(-1)[0]} works.
-      ${h.time_no.length ? `${h.time_no.join(", ")} won't be invited.` : ""}</div>` : ""}
+      Going ahead invites only the ${h.time_yes.length} who said ${esc(hhmm(active))} works.
+      ${h.time_no.length ? `${esc(h.time_no.join(", "))} won't be invited.` : ""}</div>` : ""}
     ${next ? `<div class="muted" style="margin-top:4px">
-      Trying ${next.label.split(" ").slice(-1)[0]} asks everyone who's in again, including
-      ${h.time_yes.length ? h.time_yes.join(", ") : "anyone who already said yes"}.</div>` : ""}`;
+      Trying ${esc(hhmm(next))} asks everyone who's in again, including
+      ${h.time_yes.length ? esc(h.time_yes.join(", ")) : "anyone who already said yes"}.</div>` : ""}`;
   $("report").classList.add("open");
 }
 
@@ -256,10 +267,11 @@ async function renderPlans() {
   $("planbody").innerHTML = plans.map(p => {
     const booked = p.times.find(t => t.booked);
     return `<div class="member" style="margin-bottom:12px">
-      <b>${p.title}</b> <span class="muted">${p.day}${p.location ? ` @ ${p.location}` : ""}</span>
+      <b>${esc(p.title)}</b> <span class="muted">${esc(p.day)}${p.location ? ` @ ${esc(p.location)}` : ""}</span>
       <b class="${p.status === "scheduled" ? "ok" : p.status === "dead" ? "warn" : ""}">
         ${p.status === "open" ? "" : `· ${p.status}`}</b>
-      ${booked ? ` · <a href="${booked.event_link}" target="_blank" style="color:#7ee787">booked ✓</a>` : ""}
+      ${booked ? ` · <a href="${esc(booked.event_link)}" target="_blank" rel="noopener noreferrer"
+        style="color:#7ee787">booked ✓</a>` : ""}
       <div class="muted" style="margin:4px 0">${p.times.map(t =>
         `<span class="time ${t.status}">${t.label}${
           t.status === "active" ? " ← being asked" :

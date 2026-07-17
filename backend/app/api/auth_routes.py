@@ -7,11 +7,15 @@ POST /auth/logout           -> clears the cookie
 """
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import COOKIE_NAME, get_current_user, make_session_cookie
+from app.api.deps import (
+    COOKIE_KWARGS, COOKIE_NAME, get_current_user, make_session_cookie,
+)
 from app.auth.google import build_web_flow, get_account_email
 from app.core.config import GOOGLE_REDIRECT_URI
 from app.db.models import User
@@ -20,16 +24,35 @@ from app.db.session import get_session
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# Ties a callback back to the /login that started it. Without this, anyone can
+# feed a victim's browser an authorization code of their choosing and silently
+# log that victim into an ACCOUNT THEY CONTROL — the victim then plans hangouts
+# inside the attacker's account. Google hands `state` back untouched, so a value
+# only we could have set proves the callback answers our own login.
+STATE_COOKIE = "orbi_oauth_state"
+STATE_TTL_SECONDS = 600
+
 
 @router.get("/google/login")
 def google_login():
     flow = build_web_flow(GOOGLE_REDIRECT_URI)
-    url, _state = flow.authorization_url(access_type="offline", prompt="consent")
-    return RedirectResponse(url)
+    url, state = flow.authorization_url(access_type="offline", prompt="consent")
+    response = RedirectResponse(url)
+    # SameSite=Lax still sends this on Google's top-level redirect back to us.
+    response.set_cookie(STATE_COOKIE, state, max_age=STATE_TTL_SECONDS, **COOKIE_KWARGS)
+    return response
 
 
 @router.get("/google/callback")
 def google_callback(request: Request, session: Session = Depends(get_session)):
+    expected = request.cookies.get(STATE_COOKIE)
+    received = request.query_params.get("state")
+    if not expected or not received or not secrets.compare_digest(expected, received):
+        raise HTTPException(
+            status_code=400,
+            detail="This sign-in link didn't come from here, or it expired. "
+                   "Start again from the app.",
+        )
     code = request.query_params.get("code")
     if not code:
         raise HTTPException(status_code=400, detail="Missing ?code from Google.")
@@ -41,7 +64,8 @@ def google_callback(request: Request, session: Session = Depends(get_session)):
 
     # logged in — back to the app with the signed cookie set
     response = RedirectResponse("/")
-    response.set_cookie(COOKIE_NAME, make_session_cookie(user.id), httponly=True)
+    response.set_cookie(COOKIE_NAME, make_session_cookie(user.id), **COOKIE_KWARGS)
+    response.delete_cookie(STATE_COOKIE)  # single use
     return response
 
 

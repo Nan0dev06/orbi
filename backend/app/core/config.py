@@ -22,7 +22,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # Signs the session cookie. Any random string; regenerating it just logs
 # everyone out. Set SECRET_KEY in .env for stable sessions across restarts.
+# render.yaml generates one automatically for the blueprint deploy.
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
+
+# The dev fallback is published in this file, so anyone could forge a session
+# cookie for any user with it. That is only tolerable on localhost: refuse to
+# boot with it anywhere reachable, rather than quietly serving a known key.
+if SECRET_KEY == "dev-secret-change-me" and DATABASE_URL:
+    raise RuntimeError(
+        "SECRET_KEY is still the published dev default, but DATABASE_URL is set "
+        "(this looks like a real deployment). Session cookies would be forgeable "
+        "by anyone. Set SECRET_KEY to a random secret before starting."
+    )
 
 GOOGLE_REDIRECT_URI = os.getenv(
     "GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback"
