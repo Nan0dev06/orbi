@@ -53,12 +53,14 @@ TOOL_SCHEMAS = [
     {
         "name": "suggest_venues",
         "description": (
-            "Suggest REAL venues near where the group will actually be around a "
-            "candidate slot. Reads only the location fields members typed into "
-            "their own adjacent events (never titles), anchors a midpoint, and "
-            "searches OpenStreetMap for real named places. Venues you mention "
-            "MUST come from this tool's results — if it returns none, say so "
-            "honestly. Call it AFTER you have a candidate slot the user likes."
+            "Suggest REAL venues for a candidate slot, anchored one of two ways. "
+            "By default it anchors on WHERE THE GROUP ALREADY IS: it reads only "
+            "the location fields members typed into their own adjacent events "
+            "(never titles) and takes the midpoint. Pass `near` instead to search "
+            "an area the USER named. Venues you mention MUST come from this "
+            "tool's results — if it returns none, say so honestly. Call it AFTER "
+            "you have a candidate slot the user likes, and after you know which "
+            "of the two anchors they want."
         ),
         "input_schema": {
             "type": "object",
@@ -67,6 +69,15 @@ TOOL_SCHEMAS = [
                 "end_iso": {"type": "string", "description": "Candidate slot end, ISO 8601 with offset."},
                 "kind": {"type": "string", "enum": ["cafe", "restaurant", "bar", "fast_food"],
                          "description": "What kind of place (default cafe)."},
+                "near": {
+                    "type": "string",
+                    "description": (
+                        "An area to search in, e.g. 'Hamra, Beirut' — ONLY when the user "
+                        "named one. Anchors there instead of on the group's own locations, "
+                        "and no calendar is read. Omit it to anchor on where the group "
+                        "already is. Never invent this from a guess about where they live."
+                    ),
+                },
             },
             "required": ["start_iso", "end_iso"],
         },
@@ -271,17 +282,21 @@ def _suggest_venues(ctx: ToolContext, args: dict) -> dict:
         return slot
     start, end = slot
 
+    # A user-named area needs nobody's calendar, so don't touch their tokens.
     members_with_creds = []
-    for m in repo.get_group_members(ctx.session, ctx.group.id):
-        if not m.calendar_connected:
-            continue
-        creds, refreshed = credentials_from_json(m.token_json)
-        if refreshed:
-            repo.set_user_token(ctx.session, m, refreshed)
-        members_with_creds.append((m.email, creds))
+    if not args.get("near"):
+        for m in repo.get_group_members(ctx.session, ctx.group.id):
+            if not m.calendar_connected:
+                continue
+            creds, refreshed = credentials_from_json(m.token_json)
+            if refreshed:
+                repo.set_user_token(ctx.session, m, refreshed)
+            members_with_creds.append((m.email, creds))
 
     return suggest_venues_for_slot(
-        members_with_creds, start, end, kind=args.get("kind", "cafe")
+        members_with_creds, start, end,
+        kind=args.get("kind", "cafe"),
+        near=args.get("near"),
     )
 
 

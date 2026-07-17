@@ -1,5 +1,8 @@
 """Location-anchored venue suggestion (Feature: 'where should we go?').
 
+Two ways to anchor the search: on an area the user named (then no calendar is
+read at all — see `near` below), or, by default, on where the group already is:
+
 Pipeline:
   1. For each connected member, read the LOCATION field of their own events
      adjacent to the candidate slot (within +/- N hours).
@@ -28,6 +31,12 @@ log = logging.getLogger("orbi.agent")
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Overpass is free and public, so it 504s under load. Retrying the main
+# endpoint beats failing over to a mirror: the well-known mirrors are either
+# unreliable (kumi.systems timed out) or REGIONAL (overpass.osm.ch serves
+# Switzerland only — it answers 200 with zero results for Beirut, which is
+# worse than an error because it looks like a real "no venues here").
+OVERPASS_ATTEMPTS = 3
 # Nominatim usage policy requires an identifying User-Agent.
 HTTP_HEADERS = {"User-Agent": "orbi-hackathon-demo/1.0"}
 
@@ -107,24 +116,36 @@ def distance_m(a: tuple[float, float], b: tuple[float, float]) -> int:
 
 def search_venues_near(
     lat: float, lon: float, kind: str = "cafe", radius_m: int = 1500, limit: int = 5
-) -> list[dict]:
-    """REAL venues near a point from OpenStreetMap (Overpass). Only named
-    places are returned. Empty list means 'we found nothing' — the agent must
-    say so, never invent."""
+) -> list[dict] | None:
+    """REAL venues near a point from OpenStreetMap (Overpass).
+
+    Returns [] when the area genuinely has no such venue, and None when the
+    SEARCH ITSELF failed (Overpass is a free public API and 504s under load).
+    Those two are very different and must never be conflated: reporting a
+    timeout as "no cafes here" tells the user something false about a real
+    place. Only named places are returned, and nothing is ever invented.
+    """
     kind = kind if kind in VENUE_KINDS else "cafe"
     query = (
         f'[out:json][timeout:15];'
         f'node(around:{radius_m},{lat},{lon})["amenity"="{kind}"]["name"];'
         f'out body {max(limit * 4, 20)};'
     )
-    try:
-        r = httpx.post(OVERPASS_URL, data={"data": query},
-                       headers=HTTP_HEADERS, timeout=20)
-        r.raise_for_status()
-        elements = r.json().get("elements", [])
-    except Exception as exc:
-        log.warning("[venues] overpass search failed: %s", exc)
-        return []
+    elements = None
+    for attempt in range(OVERPASS_ATTEMPTS):
+        try:
+            r = httpx.post(OVERPASS_URL, data={"data": query},
+                           headers=HTTP_HEADERS, timeout=30)
+            r.raise_for_status()
+            elements = r.json().get("elements", [])
+            break
+        except Exception as exc:
+            log.warning("[venues] overpass attempt %d/%d failed: %s",
+                        attempt + 1, OVERPASS_ATTEMPTS, exc)
+            if attempt + 1 < OVERPASS_ATTEMPTS:
+                time.sleep(2 ** attempt)  # 1s, 2s — it's usually transient load
+    if elements is None:
+        return None  # searching failed; the caller must NOT say "no venues"
 
     venues = []
     for el in elements:
@@ -142,15 +163,57 @@ def search_venues_near(
     return venues[:limit]
 
 
+def _search_failed(where: str) -> dict:
+    """The map service didn't answer. Say THAT — not 'there are no cafes'."""
+    return {
+        "search_failed": True,
+        "venues": [],
+        "note": (f"The map service (OpenStreetMap) did not respond, so the venues near "
+                 f"{where} are UNKNOWN — this is NOT the same as there being none. Do "
+                 f"not tell the user the area has no places and do not ask them for a "
+                 f"different area. Say the venue lookup is temporarily down, and offer "
+                 f"to try again in a moment or to let them name the spot themselves."),
+    }
+
+
 def suggest_venues_for_slot(
     members_with_creds: list[tuple[str, Credentials]],
     slot_start: datetime,
     slot_end: datetime,
     kind: str = "cafe",
+    near: str | None = None,
 ) -> dict:
     """The full pipeline. Returns a JSON-safe dict the agent can reason over:
     which member locations anchored the search (locations only — never why
-    they're there), the anchor area, and REAL venues found near it."""
+    they're there), the anchor area, and REAL venues found near it.
+
+    `near` anchors on an area the user named instead of on the group's own
+    locations. Nobody's calendar is read at all in that case — the user told us
+    where to look, so there is nothing to infer.
+    """
+    if near:
+        point = geocode(near)
+        if point is None:
+            return {
+                "anchor": None, "venues": [],
+                "note": (f"Could not find a place called {near!r} on the map. Ask the "
+                         "user to name the area differently, or to add the city."),
+            }
+        anchor_area = area_name(*point)
+        venues = search_venues_near(*point, kind=kind)
+        if venues is None:
+            return _search_failed(near)
+        log.info("[venues] user-named anchor %r=%s (%s) -> %d real venue(s)",
+                 near, point, anchor_area, len(venues))
+        return {
+            "anchor_area": anchor_area,
+            "anchored_on": f"the area the user asked for ({near})",
+            "venues": venues,
+            "note": (None if venues else
+                     f"The venue search near {near} returned no {kind}s — tell the "
+                     "user honestly; do NOT invent a venue."),
+        }
+
     locations_by_member: dict[str, list[str]] = {}
     for email, creds in members_with_creds:
         locs = get_adjacent_event_locations(creds, slot_start, slot_end)
@@ -184,6 +247,8 @@ def suggest_venues_for_slot(
     anchor = centroid(list(coords.values()))
     anchor_area = area_name(*anchor)
     venues = search_venues_near(*anchor, kind=kind)
+    if venues is None:
+        return _search_failed(anchor_area) | {"locations_by_member": locations_by_member}
     log.info("[venues] anchor=%s (%s) -> %d real venue(s)", anchor, anchor_area, len(venues))
 
     return {
