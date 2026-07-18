@@ -26,7 +26,7 @@ from app.db.models import GroupEvent, User
 from app.db import repo
 from app.db.session import get_session
 
-log = logging.getLogger("orbi.api")
+log = logging.getLogger("nudgy.api")
 
 router = APIRouter(tags=["events"])
 
@@ -170,7 +170,7 @@ def _sync_to_google(
             "start": {"dateTime": event.start.astimezone(timezone.utc).isoformat()},
             "end": {"dateTime": event.end.astimezone(timezone.utc).isoformat()},
             "attendees": [{"email": e} for e in attendees],
-            "description": "Created in Overlap.",
+            "description": "Created in Nudgy.",
         }
         if event.location:
             gcal_body["location"] = event.location

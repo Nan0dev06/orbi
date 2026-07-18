@@ -109,7 +109,7 @@ export default function Sidebar() {
             />
             {!collapsed && (
               <>
-                <span className="sb-label" style={{ fontSize: 15, fontWeight: 600 }}>Overlap</span>
+                <span className="sb-label" style={{ fontSize: 15, fontWeight: 600 }}>Nudgy</span>
                 <div
                   className="hov-icon"
                   style={{ marginLeft: "auto", width: 24, height: 24, flex: "none", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 8, cursor: "pointer", color: "#a49c8c" }}

@@ -565,8 +565,10 @@ function NewPollModal() {
   // poll → don't create it twice; link to the live one, or explain the failure
   const findDuplicate = (bodySlots) => {
     const norm = (s) => (s || "").trim().toLowerCase();
+    // compare slots as instants — our ISO strings end in "Z", the backend's
+    // in "+00:00", so string equality would never fire
     const key = (t, l, ss) =>
-      `${norm(t)}|${norm(l)}|${ss.map((s) => s.start_iso + s.end_iso).sort().join(",")}`;
+      `${norm(t)}|${norm(l)}|${ss.map((s) => `${new Date(s.start_iso).getTime()}-${new Date(s.end_iso).getTime()}`).sort().join(",")}`;
     const mine = key(title, where, bodySlots);
     return plans.find(
       (p) =>
@@ -578,6 +580,11 @@ function NewPollModal() {
     if (busy) return;
     if (!title.trim()) {
       setErr("A poll needs a title — the rest can be voted on.");
+      return;
+    }
+    // times without a day would be silently dropped by buildSlots — say so
+    if (!interestOnly && !date && slots.some((s) => s.start && s.end)) {
+      setErr("Pick which day those times are on.");
       return;
     }
     const bodySlots = interestOnly ? [] : buildSlots();
@@ -702,7 +709,7 @@ function NewPollModal() {
               )}
             </div>
             <span style={{ fontSize: 11, color: "#a09889" }}>
-              Optional — helps Orbi know when enough people are in.
+              Optional — helps Nudgy know when enough people are in.
             </span>
           </div>
           {err && stage === 0 && errText(err)}
@@ -841,7 +848,7 @@ function ReviewModal() {
       <div>
         <div style={{ fontSize: 19, fontWeight: 600 }}>How was it?</div>
         <div style={{ fontSize: 12, color: "#8c8577", marginTop: 3, lineHeight: 1.5 }}>
-          Orbi remembers what you liked and suggests better spots next time.
+          Nudgy remembers what you liked and suggests better spots next time.
         </div>
       </div>
       <PlacePicker
@@ -958,7 +965,7 @@ function InviteModal() {
       </div>
       <div style={{ fontSize: 12, color: "#a09889", lineHeight: 1.5 }}>
         Anyone with the code can join — no roles, no hierarchy. New members
-        connect their own calendar so Orbi can plan around them.
+        connect their own calendar so Nudgy can plan around them.
       </div>
     </div>
   );

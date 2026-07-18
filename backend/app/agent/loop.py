@@ -1,4 +1,4 @@
-"""The Orbi agentic loop — a real multi-step tool-using loop, not one LLM call.
+"""The Nudgy agentic loop — a real multi-step tool-using loop, not one LLM call.
 
 Flow per user message:
   build system prompt (with current datetime injected)
@@ -23,11 +23,28 @@ from openai import OpenAI
 
 from app.agent.prompt import build_system_prompt
 from app.agent.tools import TOOL_SCHEMAS, ToolContext, run_tool
-from app.core.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER
+from app.core.config import (
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_MAX_INPUT_TOKENS,
+    LLM_MODEL,
+    LLM_PROVIDER,
+)
 
-log = logging.getLogger("orbi.agent")
+log = logging.getLogger("nudgy.agent")
 
 MAX_STEPS = 8  # safety bound on tool-call iterations per user message
+
+
+def _estimate_tokens(messages: list[dict], tools: list[dict]) -> int:
+    """Rough token count for the whole request. No tokenizer dependency — the
+    ~4-chars-per-token heuristic is plenty for a size guard (we only need to
+    know 'is this way too big', not an exact count). Counts message content,
+    any tool-call arguments echoed back, and the tool schemas sent every call."""
+    chars = sum(len(str(m.get("content") or "")) for m in messages)
+    chars += sum(len(str(tc)) for m in messages for tc in (m.get("tool_calls") or []))
+    chars += len(str(tools))
+    return chars // 4
 
 
 @dataclass
@@ -59,7 +76,7 @@ def _openai_tools() -> list[dict]:
     ]
 
 
-def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 3):
+def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 5):
     """One chat-completion call, retried on Groq's two stochastic failures:
 
       tool_use_failed — Llama occasionally emits malformed function-call syntax
@@ -87,7 +104,9 @@ def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 3):
         except RateLimitError as exc:
             last_exc = exc
             if attempt + 1 < attempts:
-                delay = 2 ** attempt  # 1s, 2s — bounded; the caller still has a fallback
+                # Free-tier limits reset on a per-minute window, so a real wait
+                # (not a token-shaving 1-2s) is what actually clears them.
+                delay = min(4 * 2 ** attempt, 30)  # 4s, 8, 16, 30 — capped
                 log.warning("[loop] rate-limited (attempt %d/%d) — waiting %ds",
                             attempt + 1, attempts, delay)
                 time.sleep(delay)
@@ -124,7 +143,7 @@ def _taste_notes(ctx: ToolContext) -> str | None:
 
 
 def run_agent(ctx: ToolContext, history: list[dict], user_message: str) -> AgentResult:
-    """Run one turn of Orbi. `history` is prior [{"role","content"}] messages
+    """Run one turn of Nudgy. `history` is prior [{"role","content"}] messages
     (plain strings; not mutated — the caller decides what to persist)."""
     now = ctx.now_utc or datetime.now(timezone.utc)
     system = build_system_prompt(
@@ -149,8 +168,24 @@ def run_agent(ctx: ToolContext, history: list[dict], user_message: str) -> Agent
         + [{"role": "user", "content": user_message}]
     )
     trace: list[TraceStep] = []
+    tools = _openai_tools()
 
     for step in range(MAX_STEPS):
+        # Big-intake guard: notice an over-large request BEFORE the model
+        # rejects it, and ask the user to narrow rather than surfacing a raw
+        # 413. Checked every step because tool results grow the message list.
+        if LLM_MAX_INPUT_TOKENS:
+            est = _estimate_tokens(messages, tools)
+            if est > LLM_MAX_INPUT_TOKENS:
+                log.warning("[loop] request too large (~%d tokens > %d) — asking to narrow",
+                            est, LLM_MAX_INPUT_TOKENS)
+                return AgentResult(
+                    reply="This request is large enough that I might hit the model's "
+                          "limit. Could you narrow it down — a shorter message, or a "
+                          "fresh chat — so I can answer it cleanly?",
+                    trace=trace,
+                )
+
         resp = _create_with_retry(client, messages)
         msg = resp.choices[0].message
 

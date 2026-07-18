@@ -87,7 +87,7 @@ function DropPanel({ pos, panelRef, style, children }) {
   );
 }
 
-const RECENTS_KEY = "ov.placeRecents";
+const RECENTS_KEY = "nudgy.placeRecents";
 const getRecents = () => {
   try {
     return JSON.parse(localStorage.getItem(RECENTS_KEY)) || [];
@@ -205,9 +205,16 @@ export function PlacePicker({ value, onChange, placeholder = "Search a place…"
 }
 
 // ---- glass date picker ------------------------------------------------------
+// value is "YYYY-MM-DD"; new Date() would read that as UTC midnight, which is
+// the previous day for anyone west of UTC — parse it as a local date instead.
+const parseDay = (v) => {
+  const [y, m, d] = v.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+
 export function GlassDatePicker({ value, onChange, placeholder = "Pick a day" }) {
   const [open, setOpen] = useState(false);
-  const [anchor, setAnchor] = useState(() => (value ? new Date(value) : new Date()));
+  const [anchor, setAnchor] = useState(() => (value ? parseDay(value) : new Date()));
   const boxRef = useRef(null);
   const panelRef = useRef(null);
   const dropPos = useFixedDrop(boxRef, panelRef, open, 300, 258);
@@ -223,7 +230,7 @@ export function GlassDatePicker({ value, onChange, placeholder = "Pick a day" })
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
-  const sel = value ? new Date(value) : null;
+  const sel = value ? parseDay(value) : null;
   const today = new Date();
   const shiftMonth = (dir) => {
     const d = new Date(anchor);

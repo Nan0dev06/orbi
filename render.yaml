@@ -2,14 +2,14 @@
 # In the Render dashboard: New -> Blueprint -> connect this repo -> Apply.
 # See docs/deploy.md for the full walkthrough (env vars, Google redirect URI).
 databases:
-  - name: orbi-db
+  - name: nudgy-db
     plan: free
-    databaseName: orbi
-    user: orbi
+    databaseName: nudgy
+    user: nudgy
 
 services:
   - type: web
-    name: orbi
+    name: nudgy
     runtime: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
@@ -18,18 +18,19 @@ services:
       # Injected automatically from the Postgres instance above.
       - key: DATABASE_URL
         fromDatabase:
-          name: orbi-db
+          name: nudgy-db
           property: connectionString
       - key: PYTHON_VERSION
         value: "3.12.7"
       - key: LLM_PROVIDER
         value: groq
-      # Groq's free limits are per-model, and llama-3.3-70b-versatile has the
-      # tightest of them: 100K tokens/day and only 12K/minute. One agent turn
-      # costs ~4K tokens per LLM call and takes 3-4 calls, so the 70b runs out
-      # mid-demo. Scout has 500K/day and 30K/min on the same free tier.
-      - key: ORBI_MODEL
-        value: meta-llama/llama-4-scout-17b-16e-instruct
+      # Groq's free limits are per-model. llama-3.3-70b-versatile (100K
+      # tokens/day, 12K/min) is the best currently-available model for the
+      # agent's tool calling; llama-3.1-8b-instant has a bigger budget
+      # (500K/day) but is weaker at tools. The old llama-4-scout was removed
+      # from Groq's catalog (404s), so it's no longer an option.
+      - key: NUDGY_MODEL
+        value: llama-3.3-70b-versatile
       # Render generates a strong value once and keeps it stable.
       - key: SECRET_KEY
         generateValue: true

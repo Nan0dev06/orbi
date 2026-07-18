@@ -2,12 +2,12 @@
 // calendar blocks: gray "N busy" overlap clusters (with who/when rows) and
 // sage "everyone free" windows.
 
-import { startOfDay, DAY_MS } from "./dates.js";
+import { addDays, startOfDay } from "./dates.js";
 
 // Busy intervals of every member that touch `day`, clamped to that day.
 function dayIntervals(membersBusy, day) {
   const d0 = startOfDay(day).getTime();
-  const d1 = d0 + DAY_MS;
+  const d1 = addDays(day, 1).getTime();
   const out = [];
   for (const m of membersBusy || []) {
     for (const b of m.busy || []) {
@@ -53,7 +53,7 @@ export function dayClusters(membersBusy, day) {
 // Common free windows (from the endpoint) that fall on `day`.
 export function dayFreeWindows(commonSlots, day) {
   const d0 = startOfDay(day).getTime();
-  const d1 = d0 + DAY_MS;
+  const d1 = addDays(day, 1).getTime();
   return (commonSlots || [])
     .map((s) => ({ start: new Date(s.start_iso), end: new Date(s.end_iso) }))
     .filter((s) => s.end.getTime() > d0 && s.start.getTime() < d1)

@@ -5,7 +5,7 @@ import {
 } from "../theme.js";
 import { ChevronLeft, ChevronRight, CheckIcon } from "../Icons.jsx";
 import {
-  DAY_MS, mondayOf, sameDay, fmtDayShort, fmtDayLong,
+  addDays, mondayOf, sameDay, fmtDayShort, fmtDayLong,
   fmtMonth, fmtWeekLabel, fmtRange, monthCells,
 } from "../dates.js";
 import { dayClusters, dayFreeWindows } from "../availability.js";
@@ -245,7 +245,7 @@ export default function CalendarPage() {
   // ---------------- week ----------------
   const weekView = () => {
     const cols = Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(monday.getTime() + i * DAY_MS);
+      const d = addDays(monday, i);
       return {
         date: d,
         evs: events.filter((e) => sameDay(e.start, d)),
@@ -434,7 +434,7 @@ export default function CalendarPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 8, fontSize: 10.5, fontWeight: 600, letterSpacing: ".06em", color: "#a49c8c", textAlign: "center" }}>
           <span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span>
         </div>
-        <div style={{ flex: 1, display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gridTemplateRows: "repeat(5, 1fr)", gap: 8, minHeight: 0 }}>
+        <div style={{ flex: 1, display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gridTemplateRows: `repeat(${cells.length / 7}, 1fr)`, gap: 8, minHeight: 0 }}>
           {cells.map(({ date, dim }, i) => {
             const key = "mc" + i;
             const dayEvs = events.filter((e) => sameDay(e.start, date));

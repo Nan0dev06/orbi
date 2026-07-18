@@ -31,7 +31,7 @@ from app.tools.slots import (
     reasonable_hours,
 )
 
-log = logging.getLogger("orbi.agent")
+log = logging.getLogger("nudgy.agent")
 
 
 @dataclass
@@ -65,7 +65,7 @@ def fetch_busy_for_group(
     session: Session, group: Group, now: datetime, days_ahead: int
 ) -> list[MemberBusy]:
     """Live freebusy for every member. Logs each call so the loop is visible."""
-    window_end = now + timedelta(days=days_ahead)
+    window_end = now + timedelta(days=days_ahead or 1)  # 0 means "today" — still a 1-day window
     members = repo.get_group_members(session, group.id)
     results: list[MemberBusy] = []
     for user in members:
@@ -101,7 +101,7 @@ def compute_availability(
     the model would have to parse. All times are pre-formatted in tz_name.
     """
     tz = ZoneInfo(tz_name)
-    window_end = now + timedelta(days=days_ahead)
+    window_end = now + timedelta(days=days_ahead or 1)  # 0 means "today" — still a 1-day window
     members = fetch_busy_for_group(session, group, now, days_ahead)
 
     connected = [m for m in members if m.connected]
@@ -178,7 +178,7 @@ def _best_partial_windows(
     max_windows: int = 3,
 ) -> list[dict]:
     """Windows (>= duration, in reasonable hours) ranked by how many members
-    are free. Lets Orbi say '4 of 5 are free Thursday 5pm'."""
+    are free. Lets Nudgy say '4 of 5 are free Thursday 5pm'."""
     hours = reasonable_hours(now, window_end, tz_name, earliest_hour, latest_hour)
     need = timedelta(minutes=duration_minutes)
 

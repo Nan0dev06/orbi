@@ -20,7 +20,7 @@ from app.db.models import PlaceReview, User
 from app.db import repo
 from app.db.session import get_session
 
-log = logging.getLogger("orbi.api")
+log = logging.getLogger("nudgy.api")
 
 router = APIRouter(tags=["reviews"])
 
