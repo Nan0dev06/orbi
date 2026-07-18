@@ -146,17 +146,21 @@ export default function CalendarPage() {
   );
 
   // ---------------- header ----------------
+  // 1fr | auto | 1fr grid: the view switcher sits in the middle column and
+  // stays put no matter how long the date label is or which view is active.
   const header = (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div className="hov-glass" style={{ ...gpill(true), width: 32, height: 32, padding: 0, borderRadius: 11, justifyContent: "center" }} onClick={() => shift(-1)}>
+    <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+        <div className="hov-glass" style={{ ...gpill(true), width: 32, height: 32, padding: 0, borderRadius: 11, justifyContent: "center", flex: "none" }} onClick={() => shift(-1)}>
           <ChevronLeft size={14} />
         </div>
-        <span style={{ fontSize: 15, fontWeight: 600 }}>{label}</span>
-        <div className="hov-glass" style={{ ...gpill(true), width: 32, height: 32, padding: 0, borderRadius: 11, justifyContent: "center" }} onClick={() => shift(1)}>
+        <div className="hov-glass" style={{ ...gpill(true), width: 32, height: 32, padding: 0, borderRadius: 11, justifyContent: "center", flex: "none" }} onClick={() => shift(1)}>
           <ChevronRight size={14} />
         </div>
-        <div className="hov-glass" style={gpill(true)} onClick={() => setCalAnchor(new Date())}>
+        <span style={{ fontSize: 15, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {label}
+        </span>
+        <div className="hov-glass" style={{ ...gpill(true), flex: "none" }} onClick={() => setCalAnchor(new Date())}>
           Today
         </div>
       </div>
@@ -165,13 +169,14 @@ export default function CalendarPage() {
           display: "inline-flex", background: "rgba(255,253,247,.55)",
           border: "1px solid rgba(255,253,247,.7)", borderRadius: 999, padding: 3,
           boxShadow: "0 1px 2px rgba(96,78,54,.06), 0 6px 14px rgba(96,78,54,.08)",
+          justifySelf: "center",
         }}
       >
         <span style={seg(view === "day")} onClick={() => setView("day")}>Day</span>
         <span style={seg(view === "week")} onClick={() => setView("week")}>Week</span>
         <span style={seg(view === "month")} onClick={() => setView("month")}>Month</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, justifySelf: "end" }}>
         {view === "month" && (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={kicker}>Free</span>

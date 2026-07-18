@@ -44,7 +44,7 @@ export default function App() {
   const [groups, setGroups] = useState([]);
   const [activeGroupId, setActiveGroupId] = useStored("ov.activeGroup", null);
   const [members, setMembers] = useState([]);
-  const [polls, setPolls] = useState([]);
+  const [plans, setPlans] = useState([]);
   const [gateDone, setGateDone] = useState(
     () => sessionStorage.getItem("ov.gateDone") === "1"
   );
@@ -74,20 +74,28 @@ export default function App() {
   const gk = activeGroupId ? `.g${activeGroupId}` : "";
   const [activity, setActivity] = useStored(`ov.activity${gk}`, []);
   const [rsvp, setRsvp] = useStored("ov.rsvp", {});
-  const [prefs, setPrefs] = useStored("ov.prefs", {
+  // v2: auto-decline + share-busy-only now default OFF (user opts in),
+  // quiet hours are editable, and conflict priority is a choice.
+  const [prefs, setPrefs] = useStored("ov.prefs2", {
     push: true,
     digest: false,
-    auto: true,
-    busy: true,
+    auto: false,
+    busy: false,
+    prio: true,
     nvote: true,
     nrsvp: true,
     nment: true,
-    ndigest: false,
+    quiet: false,
+    quietStart: "22:00",
+    quietEnd: "08:00",
   });
   const [memory, setMemory] = useStored("ov.memory", []);
   const [profile, setProfile] = useStored("ov.profile", {});
   const [readNotifs, setReadNotifs] = useStored("ov.readNotifs", []);
-  const [myVotes, setMyVotes] = useStored("ov.myVotes", {});
+  // place reviews: [{place, stars, text, ts}] — the agent's taste memory
+  const [reviews, setReviews] = useStored("ov.reviews", []);
+  // unfinished things (event/poll started without a time) — sidebar "Drafts"
+  const [drafts, setDrafts] = useStored(`ov.drafts${gk}`, []);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId) || null;
 
@@ -119,7 +127,7 @@ export default function App() {
   const refreshGroupData = useCallback(async () => {
     if (!activeGroupId) {
       setMembers([]);
-      setPolls([]);
+      setPlans([]);
       setGroupEvents([]);
       setAvail({ members_busy: [], common_slots: [] });
       return;
@@ -127,16 +135,16 @@ export default function App() {
     try {
       const [ms, ps, evs] = await Promise.all([
         api.members(activeGroupId),
-        api.polls(activeGroupId),
+        api.plans(activeGroupId),
         api.events(activeGroupId),
       ]);
       setMembers(decorateMembers(ms, meRef.current?.email));
-      setPolls(ps);
+      setPlans(ps);
       setGroupEvents(evs);
     } catch {
       // group may have been left/removed — fall back gracefully
       setMembers([]);
-      setPolls([]);
+      setPlans([]);
       setGroupEvents([]);
     }
     // availability hits Google live for every member — slow, so don't block
@@ -162,26 +170,33 @@ export default function App() {
     [setActivity]
   );
 
-  const vote = useCallback(
-    async (pollId, yes) => {
-      const out = await api.vote(pollId, yes);
-      setPolls((ps) => ps.map((p) => (p.id === pollId ? { ...p, ...out } : p)));
-      setMyVotes((v) => ({ ...v, [pollId]: yes ? "yes" : "no" }));
-      const poll = out;
+  // Stage 1 of the cascade: "are you in for this plan at all?"
+  const voteInterest = useCallback(
+    async (planId, yes) => {
+      const out = await api.voteInterest(planId, yes);
+      setPlans((ps) => ps.map((p) => (p.id === planId ? out : p)));
       pushActivity({
         dot: yes ? "#2A9D8F" : "#D95D39",
-        pre: "You voted " + (yes ? "yes" : "no") + " on ",
-        bold: poll.title,
+        pre: yes ? "You're in for " : "You passed on ",
+        bold: out.title,
         post: "",
       });
-      if (out.auto?.action === "booked") {
-        pushActivity({
-          dot: "#2A9D8F",
-          pre: "Poll locked — ",
-          bold: `${poll.title} · ${poll.start_local}`,
-          post: " booked to everyone's calendar",
-        });
-      }
+      return out;
+    },
+    [pushActivity]
+  );
+
+  // Stage 2: "does this specific time work?"
+  const voteTime = useCallback(
+    async (planId, yes, roundId) => {
+      const out = await api.voteTime(planId, yes, roundId);
+      setPlans((ps) => ps.map((p) => (p.id === planId ? out : p)));
+      pushActivity({
+        dot: yes ? "#2A9D8F" : "#D95D39",
+        pre: `You said the time ${yes ? "works" : "doesn't work"} for `,
+        bold: out.title,
+        post: "",
+      });
       return out;
     },
     [pushActivity]
@@ -242,12 +257,17 @@ export default function App() {
     []
   );
 
-  const createPollDirect = useCallback(
+  const createPlanDirect = useCallback(
     async (body) => {
-      const poll = await api.createPoll(activeGroupId, body);
-      setPolls((ps) => [poll, ...ps]);
-      pushActivity({ dot: "#D95D39", pre: "You started poll ", bold: poll.title, post: "" });
-      return poll;
+      const plan = await api.createPlan(activeGroupId, body);
+      setPlans((ps) => [plan, ...ps]);
+      pushActivity({
+        dot: "#D95D39",
+        pre: body.slots?.length ? "You started poll " : "You asked who's in for ",
+        bold: plan.title,
+        post: "",
+      });
+      return plan;
     },
     [activeGroupId, pushActivity]
   );
@@ -257,6 +277,34 @@ export default function App() {
     setMe(updated);
     return updated;
   }, []);
+
+  const addReview = useCallback(
+    (rev) => {
+      setReviews((rs) => [
+        { ...rev, ts: Date.now() },
+        ...rs.filter((r) => r.place !== rev.place),
+      ]);
+      pushActivity({
+        dot: "#DCA744",
+        pre: `You rated ${"★".repeat(rev.stars)} `,
+        bold: rev.place,
+        post: "",
+      });
+    },
+    [setReviews, pushActivity]
+  );
+
+  const addDraft = useCallback(
+    (d) => {
+      setDrafts((ds) => [{ ...d, id: Date.now() }, ...ds].slice(0, 10));
+    },
+    [setDrafts]
+  );
+
+  const removeDraft = useCallback(
+    (id) => setDrafts((ds) => ds.filter((d) => d.id !== id)),
+    [setDrafts]
+  );
 
   const logout = useCallback(async () => {
     try {
@@ -277,9 +325,10 @@ export default function App() {
     get_group_members: "Checked who's in the group",
     find_meeting_slots: "Fetched live free/busy for every calendar",
     suggest_venues: "Searched for real venues near the group",
-    create_poll: "Created a poll for the group",
-    get_poll_status: "Checked the poll tally against the rule",
-    book_meeting: "Booked it on everyone's calendar",
+    create_plan: "Proposed a plan to the group",
+    get_plan_status: "Read the plan's tally",
+    use_next_time: "Moved to the next candidate time",
+    lock_in_time: "Locked the time in and booked it",
   };
 
   const chatMsgsRef = useRef(chatMsgs);
@@ -311,10 +360,10 @@ export default function App() {
         setTimeout(() => {
           setChatTyping(false);
           setChatMsgs((ms) => [...ms, { o: res.reply }]);
-          const touchedPolls = (res.trace || []).some((s) =>
-            ["create_poll", "book_meeting", "get_poll_status"].includes(s.name)
+          const touchedPlans = (res.trace || []).some((s) =>
+            ["create_plan", "lock_in_time", "use_next_time", "get_plan_status"].includes(s.name)
           );
-          if (touchedPolls) {
+          if (touchedPlans) {
             refreshGroupData();
             setChatMsgs((ms) => [
               ...ms,
@@ -335,20 +384,22 @@ export default function App() {
 
   // ---- derived: calendar events -------------------------------------------
   const events = useMemo(() => {
-    const fromPolls = polls
-      .filter((p) => (p.status === "approved" || p.booked) && p.start_iso)
-      .map((p) => ({
-        id: "poll" + p.id,
-        title: p.title,
-        cat: "Event",
-        start: new Date(p.start_iso),
-        end: new Date(p.end_iso),
-        where: p.location || "—",
-        link: p.event_link,
-        agent: `Approved by the group — ${p.yes} yes, ${p.no} no (needed ${p.min_yes}).`,
-        emails: members.map((m) => m.email),
-        booked: p.booked,
-      }));
+    const fromPlans = plans.flatMap((p) =>
+      (p.times || [])
+        .filter((t) => t.booked && t.start_iso)
+        .map((t) => ({
+          id: `plan${p.id}r${t.round_id}`,
+          title: p.title,
+          cat: "Event",
+          start: new Date(t.start_iso),
+          end: new Date(t.end_iso),
+          where: p.location || "—",
+          link: t.event_link,
+          agent: `Locked in by ${p.is_host ? "you" : nameFromEmail(p.host || "")} after the group voted.`,
+          emails: members.map((m) => m.email),
+          booked: true,
+        }))
+    );
     const fromBackend = groupEvents
       .filter((e) => e.kind === "event" && e.start_iso)
       .map((e) => ({
@@ -363,8 +414,8 @@ export default function App() {
         synced: e.synced,
         emails: members.map((m) => m.email),
       }));
-    return [...fromPolls, ...fromBackend].sort((a, b) => a.start - b.start);
-  }, [polls, groupEvents, members]);
+    return [...fromPlans, ...fromBackend].sort((a, b) => a.start - b.start);
+  }, [plans, groupEvents, members]);
 
   const tasks = useMemo(
     () =>
@@ -375,58 +426,105 @@ export default function App() {
           title: t.title,
           cat: t.category || "Task",
           due: t.start_iso ? t.start_iso.slice(0, 10) : "anytime",
+          dueAt: t.start_iso ? new Date(t.start_iso) : null,
           where: t.location,
           done: t.done,
         })),
     [groupEvents]
   );
 
-  const openPolls = useMemo(
-    () => polls.filter((p) => p.status === "open"),
-    [polls]
+  const openPlans = useMemo(
+    () => plans.filter((p) => p.status === "open"),
+    [plans]
   );
+
+  // favorite place = your best-rated spot; falls back to the place you go most
+  const favoritePlace = useMemo(() => {
+    if (reviews.length) {
+      const best = [...reviews].sort((a, b) => b.stars - a.stars || b.ts - a.ts)[0];
+      return { name: best.place, note: `${"★".repeat(best.stars)} from your review` };
+    }
+    const counts = {};
+    for (const e of events) if (e.where && e.where !== "—") counts[e.where] = (counts[e.where] || 0) + 1;
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return top
+      ? { name: top[0], note: `${top[1]} outing${top[1] > 1 ? "s" : ""} there` }
+      : null;
+  }, [reviews, events]);
 
   // ---- notifications (derived + read state) --------------------------------
   const notifs = useMemo(() => {
     const out = [];
-    for (const p of openPolls) {
-      if ((p.waiting_on || []).includes(me?.email))
+    for (const p of openPlans) {
+      if (p.ballot?.stage === "interest")
         out.push({
-          id: `vote${p.id}`,
+          id: `in${p.id}`,
           dot: "#D95D39",
-          pre: "Your vote is needed on ",
+          pre: "Are you in for ",
           bold: p.title,
-          post: "",
+          post: "?",
+          go: { page: "polls" },
+        });
+      else if (p.ballot?.stage === "time")
+        out.push({
+          id: `time${p.id}`,
+          dot: "#DCA744",
+          pre: "Does the time work for ",
+          bold: p.title,
+          post: "?",
+          go: { page: "polls" },
         });
     }
-    for (const p of polls) {
-      if (p.booked)
+    for (const p of plans) {
+      for (const t of p.times || []) {
+        if (t.booked)
+          out.push({
+            id: `lock${p.id}r${t.round_id}`,
+            dot: "#2A9D8F",
+            pre: "Locked in — ",
+            bold: `${p.title} · ${t.label}`,
+            post: "",
+            go: { page: "calendar" },
+          });
+      }
+    }
+    // review nudges: outings that ended in the past week, place known, unreviewed
+    const now = Date.now();
+    for (const e of events) {
+      if (
+        e.where && e.where !== "—" &&
+        e.end < now && now - e.end < 7 * 86400000 &&
+        !reviews.some((r) => r.place === e.where)
+      )
         out.push({
-          id: `lock${p.id}`,
-          dot: "#2A9D8F",
-          pre: "Poll locked — ",
-          bold: `${p.title} · ${p.start_local}`,
-          post: "",
+          id: `rev${e.id}`,
+          dot: "#DCA744",
+          pre: "How was ",
+          bold: e.where,
+          post: "? Rate it so Orbi learns your taste.",
+          go: { modal: { type: "review", place: e.where } },
         });
     }
     return out;
-  }, [polls, openPolls, me]);
+  }, [plans, openPlans, events, reviews]);
 
   const unread = notifs.some((n) => !readNotifs.includes(n.id));
 
   const ctx = {
-    me, groups, activeGroup, activeGroupId, setActiveGroupId, members, polls,
-    openPolls, events, tasks, avail,
+    me, groups, activeGroup, activeGroupId, setActiveGroupId, members, plans,
+    openPlans, events, tasks, avail,
     page, setPage, view, setView, calAnchor, setCalAnchor,
     collapsed, setCollapsed, focusId, setFocusId, hoverKey, setHoverKey,
     modal, setModal, groupOpen, setGroupOpen, notifOpen, setNotifOpen,
     settingsTab, setSettingsTab,
     chatOpen, setChatOpen, chatMsgs, chatTyping, doSend,
-    activity, pushActivity, rsvp, setRsvp, prefs, setPrefs, myVotes,
+    activity, pushActivity, rsvp, setRsvp, prefs, setPrefs,
     memory, setMemory, profile, setProfile,
     notifs, unread, readNotifs, setReadNotifs,
-    vote, createGroup, joinGroup, logout, refreshGroupData,
-    createEvent, setTaskDone, removeEvent, createPollDirect, saveProfile,
+    reviews, addReview, setReviews, favoritePlace,
+    drafts, addDraft, removeDraft,
+    voteInterest, voteTime, createGroup, joinGroup, logout, refreshGroupData,
+    createEvent, setTaskDone, removeEvent, createPlanDirect, saveProfile,
     displayName:
       me?.display_name || profile.name || (me ? nameFromEmail(me.email) : ""),
   };

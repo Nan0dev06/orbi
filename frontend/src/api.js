@@ -33,11 +33,13 @@ export const api = {
   members: (groupId) => req(`/groups/${groupId}/members`),
   availability: (groupId, days = 14) =>
     req(`/groups/${groupId}/availability?days_ahead=${days}`),
-  polls: (groupId) => req(`/groups/${groupId}/polls`),
-  createPoll: (groupId, body) =>
-    req(`/groups/${groupId}/polls`, { method: "POST", body }),
-  vote: (pollId, yes) =>
-    req(`/polls/${pollId}/vote`, { method: "POST", body: { yes } }),
+  plans: (groupId) => req(`/groups/${groupId}/plans`),
+  createPlan: (groupId, body) =>
+    req(`/groups/${groupId}/plans`, { method: "POST", body }),
+  voteInterest: (planId, yes) =>
+    req(`/plans/${planId}/interest`, { method: "POST", body: { yes } }),
+  voteTime: (planId, yes, round_id) =>
+    req(`/plans/${planId}/time-vote`, { method: "POST", body: { yes, round_id } }),
   events: (groupId) => req(`/groups/${groupId}/events`),
   createEvent: (groupId, body) =>
     req(`/groups/${groupId}/events`, { method: "POST", body }),

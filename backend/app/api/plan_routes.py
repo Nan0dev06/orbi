@@ -3,6 +3,10 @@
 GET  /groups/{group_id}/plans      -> plans for a group, each carrying THIS
                                       member's current ballot (and, for the
                                       host, the decision box)
+POST /groups/{group_id}/plans      -> create a plan directly from the app UI
+                                      (title required; candidate times and
+                                      location optional — an empty slot list is
+                                      a pure "who's in?" interest check)
 POST /plans/{plan_id}/interest     {"yes": true}  -> stage 1 answer
 POST /plans/{plan_id}/time-vote    {"yes": true, "round_id": 3} -> stage 2 answer
 
@@ -18,9 +22,10 @@ a human in the loop before anything reaches a calendar.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -41,6 +46,17 @@ class InterestBody(BaseModel):
 class TimeVoteBody(BaseModel):
     yes: bool
     round_id: int
+
+
+class SlotBody(BaseModel):
+    start_iso: str
+    end_iso: str
+
+
+class CreatePlanBody(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    location: str | None = Field(default=None, max_length=200)
+    slots: list[SlotBody] = Field(default_factory=list, max_length=6)
 
 
 def _plan_json(session: Session, plan: Plan, viewer: User, tz_name: str) -> dict:
@@ -65,6 +81,10 @@ def _plan_json(session: Session, plan: Plan, viewer: User, tz_name: str) -> dict
                 "status": r.status,
                 "booked": r.booked,
                 "event_link": r.event_link,
+                # raw instants so the frontend can place booked times on the
+                # calendar and detect duplicate proposals
+                "start_iso": r.start.astimezone(timezone.utc).isoformat(),
+                "end_iso": r.end.astimezone(timezone.utc).isoformat(),
             }
             for r in plan.rounds
         ],
@@ -114,6 +134,45 @@ def group_plans(
     _require_membership(session, user, group_id)
     plans = repo.get_group_plans(session, group_id)[:10]
     return [_plan_json(session, p, user, user.timezone) for p in plans]
+
+
+def _parse_iso_utc(value: str, name: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Bad {name}: not ISO 8601.")
+    if dt.tzinfo is None:
+        raise HTTPException(status_code=400, detail=f"Bad {name}: must include a timezone offset.")
+    return dt.astimezone(timezone.utc)
+
+
+@router.post("/groups/{group_id}/plans")
+def create_plan(
+    group_id: int,
+    body: CreatePlanBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Direct plan creation from the app UI — same shape as the agent's
+    create_plan tool. An empty slot list is a pure interest check ("who's in?");
+    the host can queue times later once they know who's coming."""
+    _require_membership(session, user, group_id)
+    slots = []
+    for i, s in enumerate(body.slots):
+        start = _parse_iso_utc(s.start_iso, f"slots[{i}].start_iso")
+        end = _parse_iso_utc(s.end_iso, f"slots[{i}].end_iso")
+        if end <= start:
+            raise HTTPException(status_code=400, detail=f"slots[{i}]: end must be after start.")
+        slots.append((start, end))
+
+    group = next(g for g in repo.get_user_groups(session, user) if g.id == group_id)
+    plan = repo.create_plan(
+        session, group, user, title=body.title.strip(),
+        slots=slots, location=(body.location or "").strip() or None,
+    )
+    log.info("[plan %d] %s created it directly from the app (%d candidate times)",
+             plan.id, user.email, len(slots))
+    return _plan_json(session, plan, user, user.timezone)
 
 
 @router.post("/plans/{plan_id}/interest")

@@ -1,7 +1,8 @@
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "../ctx.js";
-import { glass, gpill, heavy, dot } from "../theme.js";
+import { glass, gpill, heavy, dot, catChip } from "../theme.js";
 import { SearchIcon, BellIcon } from "../Icons.jsx";
-import { fmtKicker } from "../dates.js";
+import { fmtKicker, fmtDayLong } from "../dates.js";
 
 const TITLES = {
   home: null, // greeting, computed below
@@ -11,15 +12,79 @@ const TITLES = {
   settings: "Settings",
 };
 
+const CAT_COLORS = { Event: "#D95D39", Meet: "#2A9D8F", Call: "#DCA744", Task: "#DCA744", Poll: "#D95D39" };
+
 export default function TopBar() {
   const {
     page, displayName, members, notifOpen, setNotifOpen, setGroupOpen,
     notifs, unread, readNotifs, setReadNotifs,
+    events, tasks, plans, setModal, setPage, setCalAnchor, setView,
   } = useApp();
 
   const hour = new Date().getHours();
   const greet = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const title = TITLES[page] || `${greet}, ${displayName}`;
+
+  // ---- search over events, tasks and polls ---------------------------------
+  const [q, setQ] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchRef = useRef(null);
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (searchRef.current && !searchRef.current.contains(e.target)) setSearchOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const n = q.toLowerCase().trim();
+  const hit = (s) => (s || "").toLowerCase().includes(n);
+  const results = !n
+    ? []
+    : [
+        ...events
+          .filter((e) => hit(e.title) || hit(e.where))
+          .slice(0, 4)
+          .map((e) => ({
+            kind: e.cat || "Event",
+            title: e.title,
+            meta: fmtDayLong(e.start),
+            go: () => setModal({ type: "event", event: e }),
+          })),
+        ...tasks
+          .filter((t) => hit(t.title) || hit(t.where))
+          .slice(0, 4)
+          .map((t) => ({
+            kind: "Task",
+            title: t.title,
+            meta: t.done ? "done" : `due ${t.due}`,
+            go: () => setModal({ type: "task", task: t }),
+          })),
+        ...plans
+          .filter((p) => hit(p.title) || hit(p.location))
+          .slice(0, 3)
+          .map((p) => ({
+            kind: "Poll",
+            title: p.title,
+            meta: p.status,
+            go: () => setPage("polls"),
+          })),
+      ].slice(0, 8);
+
+  const pick = (r) => {
+    r.go();
+    setSearchOpen(false);
+    setQ("");
+  };
+
+  const allRead = notifs.length === 0 || notifs.every((x) => readNotifs.includes(x.id));
+
+  const openNotifTarget = (nf) => {
+    setReadNotifs((r) => (r.includes(nf.id) ? r : [...r, nf.id]));
+    setNotifOpen(false);
+    if (nf.go?.modal) setModal(nf.go.modal);
+    else if (nf.go?.page) setPage(nf.go.page);
+  };
 
   // member avatar stack — real people, tooltips with names (not just circles)
   const stack = members.slice(0, 4);
@@ -34,15 +99,52 @@ export default function TopBar() {
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-        <div
-          style={{
-            ...glass(999), height: 38, width: 190, display: "flex", alignItems: "center",
-            gap: 9, padding: "0 15px",
-            boxShadow: "0 1px 2px rgba(96,78,54,.06), 0 6px 14px rgba(96,78,54,.08)",
-          }}
-        >
-          <SearchIcon />
-          <span style={{ fontSize: 12.5, color: "#a09889" }}>Search</span>
+        <div ref={searchRef} style={{ position: "relative" }}>
+          <div
+            style={{
+              ...glass(999), height: 38, width: 220, display: "flex", alignItems: "center",
+              gap: 9, padding: "0 15px",
+              boxShadow: "0 1px 2px rgba(96,78,54,.06), 0 6px 14px rgba(96,78,54,.08)",
+            }}
+          >
+            <SearchIcon />
+            <input
+              placeholder="Search tasks, events, polls…"
+              value={q}
+              onChange={(e) => { setQ(e.target.value); setSearchOpen(true); }}
+              onFocus={() => setSearchOpen(true)}
+              style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none", fontSize: 12.5 }}
+            />
+          </div>
+          {searchOpen && n && (
+            <div
+              style={{
+                ...heavy(18), position: "absolute", top: 46, right: 0, width: 300,
+                padding: 8, display: "flex", flexDirection: "column", gap: 1, zIndex: 70,
+                animation: "popIn .18s cubic-bezier(.4,0,.2,1)",
+              }}
+            >
+              {results.map((r, i) => (
+                <div
+                  key={i}
+                  className="hov-row"
+                  onClick={() => pick(r)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 12, cursor: "pointer" }}
+                >
+                  <div style={catChip(CAT_COLORS[r.kind] || "#8A8A8A")}>{r.kind}</div>
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.title}
+                  </span>
+                  <span style={{ fontSize: 11, color: "#a09889", flex: "none" }}>{r.meta}</span>
+                </div>
+              ))}
+              {results.length === 0 && (
+                <div style={{ padding: "12px 10px", fontSize: 12.5, color: "#a09889" }}>
+                  Nothing matches “{q.trim()}”.
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div
@@ -100,28 +202,34 @@ export default function TopBar() {
                 Notifications
               </span>
               <span
-                style={{ fontSize: 11, fontWeight: 600, color: "#2B5B84", cursor: "pointer" }}
-                onClick={() => setReadNotifs(notifs.map((n) => n.id))}
+                style={{
+                  fontSize: 11, fontWeight: 600,
+                  color: allRead ? "#c9c2b4" : "#2B5B84",
+                  cursor: allRead ? "default" : "pointer",
+                  pointerEvents: allRead ? "none" : "auto",
+                }}
+                onClick={() => !allRead && setReadNotifs(notifs.map((x) => x.id))}
               >
                 Mark all read
               </span>
             </div>
-            {notifs.map((n) => {
-              const read = readNotifs.includes(n.id);
+            {notifs.map((nf) => {
+              const read = readNotifs.includes(nf.id);
               return (
                 <div
-                  key={n.id}
+                  key={nf.id}
                   className="hov-row"
+                  onClick={() => openNotifTarget(nf)}
                   style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 12, cursor: "pointer" }}
                 >
                   <div
                     style={{
-                      ...dot(read ? "transparent" : n.dot),
+                      ...dot(read ? "transparent" : nf.dot),
                       border: read ? "1.4px solid #cbc3b3" : "none",
                     }}
                   />
                   <span style={{ fontSize: 12.5, lineHeight: 1.4, color: read ? "#a09889" : "#2D2D2D" }}>
-                    {n.pre}<b>{n.bold}</b>{n.post}
+                    {nf.pre}<b>{nf.bold}</b>{nf.post}
                   </span>
                 </div>
               );

@@ -52,7 +52,7 @@ export default function ChatPanel() {
           <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
             <span style={{ fontSize: 14, fontWeight: 600 }}>Orbi</span>
             <span style={{ fontSize: 10.5, color: "#a09889", whiteSpace: "nowrap" }}>
-              Sees only busy/free — never details
+              Your group's planning assistant
             </span>
           </div>
           <div

@@ -1,151 +1,247 @@
 import { useApp } from "../ctx.js";
-import { glass, gpill, dpill, avatar, agentBox, kicker } from "../theme.js";
-import { CheckIcon } from "../Icons.jsx";
+import { glass, gpill, dpill, sagePill, agentBox } from "../theme.js";
+import { CheckIcon, PinIcon, ClockIcon } from "../Icons.jsx";
 import { nameFromEmail } from "../people.js";
 
-// Real polls from the backend: one proposed slot, yes/no votes, decision rule
-// (zero NOs + min_yes YESes → approved → auto-booked). You can change your
-// vote any time while the poll is open.
+// Two-stage plan cascade. Stage 1 asks "are you in for this at all?"; a yes
+// immediately opens stage 2 — "does the active candidate time work?". Nothing
+// auto-books: the HOST reads the tally and (through Orbi) locks a time in or
+// moves to the next one.
+
+// host_box fields are lists of emails — show a count plus the names
+const tallyLine = (list, word) => {
+  const l = list || [];
+  return l.length
+    ? `${l.length} ${word} (${l.map(nameFromEmail).join(", ")})`
+    : `0 ${word}`;
+};
 export default function PollsPage() {
-  const { polls, members, myVotes, vote, setPage, setView, setModal, activeGroup } = useApp();
+  const {
+    plans, activeGroup, voteInterest, voteTime, setModal, setPage, setView, doSend,
+  } = useApp();
 
-  const total = members.length || 1;
+  let expectedMap = {};
+  try {
+    expectedMap = JSON.parse(localStorage.getItem("ov.expected") || "{}");
+  } catch { /* fine */ }
 
-  const optionRow = (p, yes) => {
-    const count = yes ? p.yes : p.no;
-    const c = yes ? "#2A9D8F" : "#D95D39";
-    const selected = myVotes[p.id] === (yes ? "yes" : "no");
+  const choice = (label, sub, color, onClick, selected) => (
+    <div
+      className="hov-lift-sm"
+      onClick={onClick}
+      style={{
+        flex: 1, borderRadius: 16, padding: "12px 15px", display: "flex",
+        flexDirection: "column", gap: 3, cursor: "pointer", transition: "all .2s",
+        background: selected
+          ? `linear-gradient(135deg, color-mix(in srgb, ${color} 16%, rgba(255,251,244,.6)), rgba(250,242,231,.4))`
+          : "rgba(255,253,247,.45)",
+        border: selected ? `1.6px solid ${color}` : "1px solid rgba(255,255,255,.6)",
+      }}
+    >
+      <span style={{ fontSize: 14, fontWeight: 600, color: selected ? color : "#2D2D2D" }}>{label}</span>
+      {sub && <span style={{ fontSize: 11.5, color: "#a09889" }}>{sub}</span>}
+    </div>
+  );
+
+  const statusChip = (p) => {
+    const map = {
+      open: ["#D95D39", "Poll · open"],
+      scheduled: ["#2A9D8F", "Locked in"],
+      dead: ["#a09889", "Didn't work out"],
+    };
+    const [c, label] = map[p.status] || ["#a09889", p.status];
     return (
-      <div
-        className="hov-lift-sm"
-        onClick={() => vote(p.id, yes)}
-        style={{
-          borderRadius: 16, padding: "13px 15px", display: "flex",
-          flexDirection: "column", gap: 8, cursor: "pointer", transition: "all .2s",
-          background: selected
-            ? `linear-gradient(135deg, color-mix(in srgb, ${c} 16%, rgba(255,251,244,.6)), rgba(250,242,231,.4))`
-            : "rgba(255,253,247,.45)",
-          border: selected ? `1.6px solid ${c}` : "1px solid rgba(255,255,255,.6)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span style={{ fontSize: 14, fontWeight: 600 }}>
-            {yes ? "Works for me" : "Can't make it"}
-          </span>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: count > 0 ? c : "#a09889" }}>
-            {count} {count === 1 ? "vote" : "votes"}
-          </span>
-        </div>
-        <div style={{ height: 7, borderRadius: 4, background: "rgba(150,142,128,.2)" }}>
-          <div
-            style={{
-              height: "100%", borderRadius: 4, background: c,
-              width: `${Math.round((count / total) * 100)}%`,
-              transition: "width .4s cubic-bezier(.4,0,.2,1)",
-            }}
-          />
-        </div>
-      </div>
+      <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: c }}>
+        {label}
+      </span>
     );
   };
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "flex", flexDirection: "column", gap: 18, animation: "fadeUp .35s cubic-bezier(.4,0,.2,1)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "min(620px, 100%)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "min(640px, 100%)" }}>
         <span style={{ fontSize: 13, color: "#8c8577" }}>
-          {polls.length
-            ? "You can change your vote until a poll locks."
-            : "No polls yet — start one and Orbi books the winner."}
+          {plans.length
+            ? "Say if you're in first — then vote on the time."
+            : "No polls yet — ask who's in, or propose a full plan."}
         </span>
         <div className="hov-lift-sm" style={dpill(true)} onClick={() => setModal({ type: "newPoll" })}>
           + New poll
         </div>
       </div>
 
-      {polls.map((p) => {
-        const locked = p.status === "approved" || p.booked;
-        const rejected = p.status === "rejected";
-        const voters = p.yes + p.no;
+      {plans.map((p) => {
+        const b = p.ballot || {};
+        const times = p.times || [];
+        const bookedRound = times.find((t) => t.booked);
+        const hb = p.host_box;
         return (
           <div
             key={p.id}
+            id={`plan-${p.id}`}
             style={{
-              ...glass(24), width: "min(620px, 100%)", padding: "20px 22px",
+              ...glass(24), width: "min(640px, 100%)", padding: "20px 22px",
               display: "flex", flexDirection: "column", gap: 14, flex: "none",
             }}
           >
-            {!locked && !rejected && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              {statusChip(p)}
+              <span style={{ fontSize: 12, color: "#a09889" }}>
+                by {p.is_host ? "you" : nameFromEmail(p.host || "")}
+              </span>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 600 }}>{p.title}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 5, fontSize: 12.5, color: "#8c8577", flexWrap: "wrap" }}>
+                {p.location && (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <PinIcon size={13} /> {p.location}
+                  </span>
+                )}
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                  <ClockIcon size={13} /> {p.day}
+                </span>
+                {expectedMap[p.id] && (
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: "#2B5B84" }}>
+                    aiming for {expectedMap[p.id]} people
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* ---- my ballot -------------------------------------------- */}
+            {p.status === "open" && b.stage === "interest" && (
               <>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "#D95D39" }}>
-                    Poll · open
-                  </span>
-                  <span style={{ fontSize: 12, color: "#a09889" }}>
-                    {voters} of {total} voted
-                  </span>
-                </div>
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 600 }}>{p.title}</div>
-                  <div style={{ fontSize: 12.5, color: "#8c8577", marginTop: 4 }}>
-                    {p.start_local} – {p.end_local}
-                    {p.location ? ` · ${p.location}` : ""}
-                  </div>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-                  {optionRow(p, true)}
-                  {optionRow(p, false)}
-                </div>
-                <div style={{ fontSize: 12, color: "#a09889" }}>
-                  Needs {p.min_yes} yes and zero no to lock automatically.
-                  {(p.waiting_on || []).length > 0 &&
-                    ` Waiting on ${p.waiting_on.map(nameFromEmail).join(", ")}.`}
+                <div style={{ fontSize: 13, fontWeight: 600 }}>Are you in?</div>
+                <div style={{ display: "flex", gap: 11 }}>
+                  {choice("I'm in", times.length ? "you'll get the time question next" : null, "#2A9D8F", () => voteInterest(p.id, true))}
+                  {choice("Not this time", null, "#D95D39", () => voteInterest(p.id, false))}
                 </div>
               </>
             )}
 
-            {locked && (
+            {p.status === "open" && b.stage === "time" && b.round_id && (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                  Does <span style={{ color: "#2B5B84" }}>{b.time_label}</span> work for you?
+                </div>
+                <div style={{ display: "flex", gap: 11 }}>
+                  {choice("Works for me", null, "#2A9D8F", () => voteTime(p.id, true, b.round_id))}
+                  {choice("Can't at that time", "you stay in the plan — the host may try another time", "#D95D39", () => voteTime(p.id, false, b.round_id))}
+                </div>
+              </>
+            )}
+
+            {b.note && (
+              <div style={{ fontSize: 12.5, color: "#8c8577", lineHeight: 1.5 }}>{b.note}</div>
+            )}
+
+            {/* ---- candidate times queue -------------------------------- */}
+            {times.length > 0 && p.status === "open" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "#a49c8c" }}>
+                  Candidate times
+                </span>
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                  {times.map((t) => (
+                    <span
+                      key={t.round_id}
+                      style={{
+                        fontSize: 11.5, fontWeight: 600, padding: "5px 12px", borderRadius: 999,
+                        background:
+                          t.status === "active" ? "rgba(42,157,143,.14)"
+                          : t.status === "skipped" ? "rgba(150,142,128,.14)"
+                          : "rgba(255,253,247,.55)",
+                        color:
+                          t.status === "active" ? "#2A9D8F"
+                          : t.status === "skipped" ? "#a09889"
+                          : "#5c564b",
+                        textDecoration: t.status === "skipped" ? "line-through" : "none",
+                        border: "1px solid rgba(255,255,255,.6)",
+                      }}
+                    >
+                      {t.label}
+                      {t.status === "active" ? " · now asking" : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ---- host's decision box ---------------------------------- */}
+            {hb && p.status === "open" && (
+              <div style={agentBox}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#2A9D8F" }}>
+                  Your host box
+                </span>
+                <span style={{ fontSize: 12.5, lineHeight: 1.5, color: "#5c564b" }}>
+                  {tallyLine(hb.interested, "in")} · {tallyLine(hb.not_interested, "out")} ·{" "}
+                  {(hb.no_answer || []).length
+                    ? `waiting on ${(hb.no_answer || []).map(nameFromEmail).join(", ")}`
+                    : "everyone answered"}
+                  {times.length > 0 &&
+                    ` — active time: ${tallyLine(hb.time_yes, "yes")}, ${tallyLine(hb.time_no, "no")}, ${(hb.time_waiting || []).length} waiting`}
+                </span>
+                {hb.note && (
+                  <span style={{ fontSize: 12, lineHeight: 1.5, color: "#8c8577" }}>{hb.note}</span>
+                )}
+                <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                  {times.length > 0 && (
+                    <>
+                      <div
+                        className="hov-lift-sm"
+                        style={{ ...sagePill(true), padding: "5px 13px", fontSize: 11.5 }}
+                        onClick={() => doSend(`Lock in the active time for the plan "${p.title}"`)}
+                      >
+                        Lock it in
+                      </div>
+                      <div
+                        className="hov-glass"
+                        style={{ ...gpill(true), padding: "5px 13px", fontSize: 11.5 }}
+                        onClick={() => doSend(`The current time doesn't work — move to the next candidate time for the plan "${p.title}"`)}
+                      >
+                        Try the next time
+                      </div>
+                    </>
+                  )}
+                  {times.length === 0 && (
+                    <div
+                      className="hov-lift-sm"
+                      style={{ ...dpill(true), padding: "5px 13px", fontSize: 11.5 }}
+                      onClick={() =>
+                        setModal({
+                          type: "newPoll",
+                          proposeChange: {
+                            planId: p.id, title: p.title, location: p.location || "",
+                            skipToTimes: true,
+                          },
+                        })
+                      }
+                    >
+                      Add times now
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ---- locked / dead states --------------------------------- */}
+            {p.status === "scheduled" && bookedRound && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#2A9D8F", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <CheckIcon size={15} color="#fff" sw={2.6} />
                   </div>
-                  <span style={{ fontSize: 16, fontWeight: 600 }}>Locked in</span>
+                  <span style={{ fontSize: 15, fontWeight: 600 }}>{bookedRound.label}</span>
                 </div>
-                <div style={{ height: 64, borderRadius: 14, background: "linear-gradient(120deg, #F3C9A8, #A9CBB6, #C9B6D4)" }} />
-                <div>
-                  <div style={{ fontSize: 17, fontWeight: 600 }}>
-                    {p.title}
-                    {p.location ? ` · ${p.location}` : ""}
-                  </div>
-                  <div style={{ fontSize: 12, color: "#a09889", marginTop: 3 }}>
-                    {p.start_local} — {p.yes} of {total} said yes, none said no
-                  </div>
-                </div>
-                <div style={agentBox}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "#2A9D8F" }}>
-                    Why this one locked
-                  </span>
-                  <span style={{ fontSize: 12.5, lineHeight: 1.5, color: "#5c564b" }}>
-                    Zero no votes and at least {p.min_yes} yes — the group's rule
-                    passed, so Orbi {p.booked ? "booked it on everyone's calendar." : "is booking it now."}
-                  </span>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ display: "flex" }}>
-                    {members.map((m, i) => (
-                      <div key={m.email} title={m.name} style={{ ...avatar(m.color, 22), marginRight: i < members.length - 1 ? -6 : 0 }} />
-                    ))}
-                  </div>
-                  <span style={{ fontSize: 12, color: "#a09889" }}>
-                    {p.booked ? "Added to everyone's calendar" : "Booking…"}
-                  </span>
-                </div>
+                <div style={{ height: 56, borderRadius: 14, background: "linear-gradient(120deg, #F3C9A8, #A9CBB6, #C9B6D4)" }} />
                 <div style={{ display: "flex", gap: 9 }}>
                   <div className="hov-glass" style={gpill(true)} onClick={() => { setPage("calendar"); setView("week"); }}>
                     View on calendar
                   </div>
-                  {p.event_link && (
-                    <a href={p.event_link} target="_blank" rel="noreferrer" style={{ ...gpill(true), textDecoration: "none" }}>
+                  {bookedRound.event_link && (
+                    <a href={bookedRound.event_link} target="_blank" rel="noreferrer" style={{ ...gpill(true), textDecoration: "none" }}>
                       Open in Google Calendar
                     </a>
                   )}
@@ -153,22 +249,26 @@ export default function PollsPage() {
               </>
             )}
 
-            {rejected && (
+            {p.status === "dead" && (
               <>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "#a09889" }}>
-                    Poll · declined
-                  </span>
-                  <span style={{ fontSize: 12, color: "#a09889" }}>{voters} of {total} voted</span>
+                <div style={{ fontSize: 12.5, color: "#a09889", lineHeight: 1.5 }}>
+                  Every candidate time was tried and none worked. Suggest a change —
+                  same plan, different times or place.
                 </div>
-                <div>
-                  <div style={{ fontSize: 17, fontWeight: 600, color: "#8c8577" }}>{p.title}</div>
-                  <div style={{ fontSize: 12.5, color: "#a09889", marginTop: 3 }}>
-                    {p.start_local} — someone couldn't make it, so this slot won't be booked.
-                  </div>
-                </div>
-                <div className="hov-glass" style={{ ...gpill(true), alignSelf: "flex-start" }} onClick={() => setModal({ type: "newPoll" })}>
-                  Propose another time
+                <div
+                  className="hov-glass"
+                  style={{ ...gpill(true), alignSelf: "flex-start" }}
+                  onClick={() =>
+                    setModal({
+                      type: "newPoll",
+                      proposeChange: {
+                        planId: p.id, title: p.title, location: p.location || "",
+                        slots: (p.times || []).map((t) => ({ start_iso: t.start_iso, end_iso: t.end_iso })),
+                      },
+                    })
+                  }
+                >
+                  Suggest a change
                 </div>
               </>
             )}
@@ -176,8 +276,8 @@ export default function PollsPage() {
         );
       })}
 
-      {polls.length === 0 && activeGroup && (
-        <div style={{ ...glass(24), width: "min(620px, 100%)", padding: "26px 22px", textAlign: "center", color: "#8c8577", fontSize: 13.5 }}>
+      {plans.length === 0 && activeGroup && (
+        <div style={{ ...glass(24), width: "min(640px, 100%)", padding: "26px 22px", textAlign: "center", color: "#8c8577", fontSize: 13.5 }}>
           That's it for now!
         </div>
       )}

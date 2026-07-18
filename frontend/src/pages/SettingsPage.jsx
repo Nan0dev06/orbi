@@ -4,13 +4,16 @@ import {
   glass, gpill, dpill, dashPill, avatar, fieldStyle, fieldRead, fieldLabel,
   toggleStyle, knobStyle, prefCard,
 } from "../theme.js";
+import { StarRow, GlassTimePicker, PlacePicker } from "../components/Fields.jsx";
+import { relTime } from "../dates.js";
 
-const TABS = ["Account", "Preferences", "Memory", "Groups", "Notifications"];
+const TABS = ["Account", "Preferences", "Memory", "Reviews", "Groups", "Notifications"];
 
 export default function SettingsPage() {
   const {
     me, displayName, saveProfile, prefs, setPrefs, memory, setMemory,
     groups, members, activeGroup, setModal, logout, setSettingsTab, settingsTab,
+    reviews, setReviews,
   } = useApp();
 
   const [memInput, setMemInput] = useState("");
@@ -196,8 +199,44 @@ export default function SettingsPage() {
           <>
             {toggleRow("push", "Push notifications", "Votes, RSVPs, mentions")}
             {toggleRow("digest", "Weekly email digest", "Sunday evening summary")}
-            {toggleRow("auto", "Auto-decline conflicts", "Skip polls that clash with existing events")}
-            {toggleRow("busy", "Share busy times only", "The agent never sees your event titles or details")}
+            {toggleRow("auto", "Auto-decline conflicts", "Off by default — when on, polls that clash with your events are declined for you")}
+            {prefs.auto &&
+              toggleRow("prio", "Let me choose which event wins", "When two things clash you pick the one to keep, instead of always losing the newer one")}
+            {toggleRow("busy", "Share busy times only", "Off by default. Leaving this off lets Orbi see titles and places, so it can learn what you like from your reviews and plan around it")}
+          </>
+        )}
+
+        {settingsTab === "Reviews" && (
+          <>
+            <div style={{ fontSize: 13, color: "#8c8577", marginTop: -6, lineHeight: 1.5 }}>
+              Rate the places you've been. Orbi saves these as taste memory —
+              next time someone types “bhi” it knows you mean BHive, and it can
+              suggest spots you actually liked.
+            </div>
+            <AddReview />
+            {reviews.map((r, i) => (
+              <div key={i} style={{ ...prefCard, alignItems: "flex-start" }}>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 14, fontWeight: 600 }}>{r.place}</span>
+                    <StarRow value={r.stars} size={13} />
+                  </div>
+                  {r.text && <span style={{ fontSize: 12.5, color: "#5c564b", lineHeight: 1.45 }}>{r.text}</span>}
+                  <span style={{ fontSize: 10.5, color: "#a09889" }}>{relTime(r.ts)}</span>
+                </div>
+                <span
+                  style={{ fontSize: 12, fontWeight: 600, color: "#b08a80", cursor: "pointer", flex: "none" }}
+                  onClick={() => setReviews((rs) => rs.filter((_, j) => j !== i))}
+                >
+                  Remove
+                </span>
+              </div>
+            ))}
+            {reviews.length === 0 && (
+              <div style={{ fontSize: 12.5, color: "#a09889" }}>
+                No reviews yet — after an outing you'll get a nudge to rate the place.
+              </div>
+            )}
           </>
         )}
 
@@ -297,9 +336,70 @@ export default function SettingsPage() {
             {toggleRow("nvote", "Votes needed", "When a poll is waiting on you")}
             {toggleRow("nrsvp", "RSVP updates", "When someone answers going or can't")}
             {toggleRow("nment", "Mentions", "When someone tags you")}
-            {toggleRow("ndigest", "Quiet hours", "Mute everything 10pm–8am")}
+            {toggleRow("quiet", "Quiet hours", `Mute everything ${prefs.quietStart || "22:00"}–${prefs.quietEnd || "08:00"}`)}
+            {prefs.quiet && (
+              <div style={{ ...prefCard, gap: 10 }}>
+                <span style={{ fontSize: 12.5, color: "#8c8577", flex: "none" }}>From</span>
+                <GlassTimePicker
+                  value={prefs.quietStart || "22:00"}
+                  onChange={(t) => setPrefs((p) => ({ ...p, quietStart: t }))}
+                />
+                <span style={{ fontSize: 12.5, color: "#8c8577", flex: "none" }}>to</span>
+                <GlassTimePicker
+                  value={prefs.quietEnd || "08:00"}
+                  onChange={(t) => setPrefs((p) => ({ ...p, quietEnd: t }))}
+                />
+              </div>
+            )}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function AddReview() {
+  const { addReview, reviews } = useApp();
+  const [place, setPlace] = useState("");
+  const [stars, setStars] = useState(0);
+  const [text, setText] = useState("");
+
+  const save = () => {
+    if (!place.trim() || !stars) return;
+    addReview({ place: place.trim(), stars, text: text.trim() });
+    setPlace("");
+    setStars(0);
+    setText("");
+  };
+
+  return (
+    <div style={{ ...prefCard, flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <PlacePicker
+            value={place}
+            onChange={setPlace}
+            placeholder="Which place?"
+            reviewedPlaces={reviews.map((r) => r.place)}
+          />
+        </div>
+        <StarRow value={stars} onChange={setStars} size={20} />
+      </div>
+      <div style={{ display: "flex", gap: 10 }}>
+        <input
+          placeholder="A few words — what was it like?"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && save()}
+          style={fieldStyle}
+        />
+        <div
+          className="hov-lift-sm"
+          style={{ ...dpill(true), opacity: place.trim() && stars ? 1 : 0.5 }}
+          onClick={save}
+        >
+          Save review
+        </div>
       </div>
     </div>
   );
