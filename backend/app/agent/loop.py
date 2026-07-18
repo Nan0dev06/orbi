@@ -59,7 +59,7 @@ def _openai_tools() -> list[dict]:
     ]
 
 
-def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 3):
+def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 5):
     """One chat-completion call, retried on Groq's two stochastic failures:
 
       tool_use_failed — Llama occasionally emits malformed function-call syntax
@@ -87,7 +87,9 @@ def _create_with_retry(client: OpenAI, messages: list[dict], attempts: int = 3):
         except RateLimitError as exc:
             last_exc = exc
             if attempt + 1 < attempts:
-                delay = 2 ** attempt  # 1s, 2s — bounded; the caller still has a fallback
+                # Free-tier limits reset on a per-minute window, so a real wait
+                # (not a token-shaving 1-2s) is what actually clears them.
+                delay = min(4 * 2 ** attempt, 30)  # 4s, 8, 16, 30 — capped
                 log.warning("[loop] rate-limited (attempt %d/%d) — waiting %ds",
                             attempt + 1, attempts, delay)
                 time.sleep(delay)
