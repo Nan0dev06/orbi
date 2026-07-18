@@ -1,5 +1,4 @@
-"""SQLite schema (SQLAlchemy 2.0). Deliberately tiny — 3 tables for Phase 2
-(polls + votes get added in Phase 3).
+"""SQLite schema (SQLAlchemy 2.0). Deliberately tiny.
 
 Design notes:
 - A User's Google OAuth token is stored as the raw JSON string Google's
@@ -63,33 +62,82 @@ class Group(Base):
     )
 
 
-class Poll(Base):
-    """A proposed meeting slot the group votes on.
+class Plan(Base):
+    """A proposed hangout: a place, a day, and an ordered queue of candidate times.
 
-    Times are stored in UTC (tz handling happens at the edges, as everywhere).
-    min_yes is fixed at creation (decide-once rule): book only if there are
-    zero NO votes AND at least min_yes YES votes.
-    Status: open -> approved | rejected | cancelled. `booked` flips to True
-    once the calendar event is actually written (approved != booked, so we
-    can never double-book).
+    Voting is a two-stage cascade, evaluated per person (see tools/plan_rules.py):
+      stage 1 INTEREST — every member: "coming to the coffee shop Monday?"
+                         no  -> out of the plan entirely, never asked a time
+                         yes -> immediately handed the active time question
+      stage 2 TIME     — the interested cohort only: "does 5 PM work?"
+                         no  -> out of THAT time, still in the plan
+
+    Exactly one TimeRound is "active" at a time. Nothing is ever booked by a
+    rule — no majority, no unanimity, no auto-booking on silence. The HOST
+    (created_by) reads the tally and either confirms the active time or moves
+    to the next one, which re-asks the whole interested cohort.
+    Status: open -> scheduled | dead (all candidate times used up).
+
+    The plan's DAY is not stored — it is derived from the rounds' times in the
+    viewer's timezone, so everyone reads the day in their own zone.
     """
-    __tablename__ = "polls"
+    __tablename__ = "plans"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id"))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    title: Mapped[str] = mapped_column(String, default="Group meetup")
+    title: Mapped[str] = mapped_column(String, default="Group hangout")
     location: Mapped[str | None] = mapped_column(String, default=None)
-    slot_start_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    slot_end_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    min_yes: Mapped[int] = mapped_column(default=1)
     status: Mapped[str] = mapped_column(String, default="open")
-    booked: Mapped[bool] = mapped_column(default=False)
-    event_link: Mapped[str | None] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    votes: Mapped[list["Vote"]] = relationship(
-        back_populates="poll", cascade="all, delete-orphan"
+    rounds: Mapped[list["TimeRound"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan", order_by="TimeRound.ordinal"
+    )
+    interest_votes: Mapped[list["InterestVote"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan"
+    )
+
+
+class InterestVote(Base):
+    """Stage 1: one member's yes/no on the plan itself. Re-voting replaces."""
+    __tablename__ = "interest_votes"
+    __table_args__ = (UniqueConstraint("plan_id", "user_id", name="uq_plan_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    yes: Mapped[bool] = mapped_column()
+    voted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    plan: Mapped["Plan"] = relationship(back_populates="interest_votes")
+    user: Mapped["User"] = relationship()
+
+
+class TimeRound(Base):
+    """Stage 2: one candidate time for a plan (5 PM, then 7 PM, ...).
+
+    Times are stored in UTC (tz handling happens at the edges, as everywhere).
+    ordinal fixes the queue order the host walks through.
+    Status: queued -> active -> confirmed | skipped. `booked` flips to True
+    once the calendar event is actually written (confirmed != booked, so we
+    can never double-book).
+    """
+    __tablename__ = "time_rounds"
+    __table_args__ = (UniqueConstraint("plan_id", "ordinal", name="uq_plan_ordinal"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id"))
+    ordinal: Mapped[int] = mapped_column()
+    slot_start_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    slot_end_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String, default="queued")
+    booked: Mapped[bool] = mapped_column(default=False)
+    event_link: Mapped[str | None] = mapped_column(String, default=None)
+
+    plan: Mapped["Plan"] = relationship(back_populates="rounds")
+    votes: Mapped[list["TimeVote"]] = relationship(
+        back_populates="round", cascade="all, delete-orphan"
     )
 
     # SQLite drops tzinfo on read — these accessors re-attach UTC so no naive
@@ -105,18 +153,22 @@ class Poll(Base):
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-class Vote(Base):
-    """One member's yes/no on a poll; voting again replaces the old vote."""
-    __tablename__ = "votes"
-    __table_args__ = (UniqueConstraint("poll_id", "user_id", name="uq_poll_user"),)
+class TimeVote(Base):
+    """One member's yes/no on ONE candidate time; re-voting replaces the old vote.
+
+    A no here only removes them from THIS time — they stay in the interested
+    cohort and are asked again if the host moves to the next time.
+    """
+    __tablename__ = "time_votes"
+    __table_args__ = (UniqueConstraint("round_id", "user_id", name="uq_round_user"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    poll_id: Mapped[int] = mapped_column(ForeignKey("polls.id"))
+    round_id: Mapped[int] = mapped_column(ForeignKey("time_rounds.id"))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     yes: Mapped[bool] = mapped_column()
     voted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    poll: Mapped["Poll"] = relationship(back_populates="votes")
+    round: Mapped["TimeRound"] = relationship(back_populates="votes")
     user: Mapped["User"] = relationship()
 
 

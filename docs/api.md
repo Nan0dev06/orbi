@@ -208,27 +208,31 @@ Notes for the UI:
 
 ---
 
-## Polls & voting
+## Plans & voting
 
-Polls are created by Orbi (via chat) **or directly via REST**; members then
-vote through these endpoints. The decision rule runs after every vote: any NO
-⇒ `rejected`; zero NO and ≥ `min_yes` YES ⇒ `approved`; else stays `open`.
-An approving vote triggers the autonomous follow-through (auto-book).
+A **plan** is one place, one day, and an ordered queue of candidate times. Plans
+are created by Orbi (via chat) **or directly via REST** (`POST
+/groups/{group_id}/plans`, same shape as the agent's create_plan tool); members
+answer through the two endpoints below.
 
-### `POST /groups/{group_id}/polls`
-Same rules as the agent's create_poll tool — `min_yes` defaults to unanimous
-and is clamped to the member count.
+**The cascade — two different questions.** Every member is first asked about the
+plan *itself* (place + day, no time). A **no** there puts them out of the whole
+plan and they are never asked a time. A **yes** immediately opens the time
+question *for that member* — they do not wait for anyone else to answer. Only
+**one** candidate time is ever on the table at a time. A **no** to a time means
+"not at 5pm", not "not coming": they stay in the plan and get asked again if the
+host moves to the next time.
 
-Request:
-```json
-{"title": "Dinner this week", "start_iso": "2026-07-18T19:00:00+03:00",
- "end_iso": "2026-07-18T21:00:00+03:00", "location": "Kalei", "min_yes": 2}
-```
-Response `200`: the poll object (shape below). Poll responses also include
-`start_iso` / `end_iso` so the frontend can place booked events on the calendar.
+**Nothing here decides anything.** No majority, no unanimity, no threshold, no
+auto-booking, and a single no does not kill a time. Voting only advances that
+one member through their own cascade. The **host** (the member who suggested it)
+reads the tally and tells Orbi to either lock the time in — which books *only*
+the people who said that time works — or move to the next time. Both of those
+happen through chat, not REST.
 
-### `GET /groups/{group_id}/polls`
-Newest first, max 10.
+### `GET /groups/{group_id}/plans`
+Newest first, max 10. Every plan carries **the current user's own ballot**;
+`host_box` is present **only if the current user is the host**.
 
 Response `200`:
 ```json
@@ -237,28 +241,80 @@ Response `200`:
     "id": 3,
     "title": "Coffee catch-up",
     "location": "Kalei Coffee, Mar Mikhael",
-    "start_local": "Thu 16 Jul 19:00",
-    "end_local": "Thu 16 Jul 20:00",
+    "day": "Monday 20 July",
     "status": "open",
-    "booked": false,
-    "event_link": null,
-    "yes": 1,
-    "no": 0,
-    "min_yes": 2,
-    "waiting_on": ["nano.06dev@gmail.com"]
+    "host": "nan0.al.shami2006@gmail.com",
+    "is_host": false,
+    "times": [
+      {"round_id": 5, "ordinal": 0, "label": "Mon 20 Jul 17:00-18:00",
+       "status": "active", "booked": false, "event_link": null},
+      {"round_id": 6, "ordinal": 1, "label": "Mon 20 Jul 19:00-20:00",
+       "status": "queued", "booked": false, "event_link": null}
+    ],
+    "ballot": {
+      "stage": "time",
+      "note": "Does this time work for you?",
+      "round_id": 5,
+      "time_label": "Mon 20 Jul 17:00-18:00"
+    }
   }
 ]
 ```
-`status`: `open` | `approved` | `rejected`. Once booked, `booked: true` and
-`event_link` is the Google Calendar link.
 
-### `POST /polls/{poll_id}/vote`
-Voting again replaces your previous vote. Closed/booked polls reject votes.
+`status`: `open` | `scheduled` | `dead` (every candidate time was used up).
+`times[].status`: `queued` (held back) | `active` (being asked now) | `skipped`
+(host moved on) | `confirmed` (host locked it in). `day` and every `label` are
+already in the current user's timezone.
+
+`ballot.stage` tells the UI exactly what to render for this member:
+
+| stage | render |
+|---|---|
+| `interest` | the plan question + in/out buttons |
+| `time` | the `time_label` question + yes/no buttons; POST with `round_id` |
+| `waiting` | just `note` — they've answered everything on the table |
+| `out` | just `note` — they said no to the plan |
+| `closed` | just `note` — the plan is scheduled or dead |
+
+`round_id`/`time_label` are non-null only when `stage` is `time`.
+
+For the host only:
+```json
+"host_box": {
+  "interested": ["bea@x.com", "dia@x.com"],
+  "not_interested": ["cal@x.com"],
+  "no_answer": ["eve@x.com"],
+  "time_yes": ["bea@x.com"],
+  "time_no": ["dia@x.com"],
+  "time_waiting": [],
+  "note": "For Mon 20 Jul 17:00-18:00: 1 of 2 interested can make it. IN: bea@x.com. OUT for this time (still in for the plan): dia@x.com. ... Your call: lock in ... or move to the next time ..."
+}
+```
+The time columns only ever cover the interested cohort — someone who said no to
+the plan is never counted as silent on a time they were never asked. Render
+`note` as-is and let the host tell Orbi what to do.
+
+### `POST /plans/{plan_id}/interest`
+Stage 1. Answering again replaces your previous answer.
 
 Request:
 ```json
 {"yes": true}
 ```
-Response `200`: the updated poll object (same shape as above).
-Response `400`: `{"detail": "Poll is rejected; voting is closed."}`
-Response `403`: `{"detail": "You are not in this group."}`
+Response `200`: the updated plan object. **A `yes` comes straight back with
+`ballot.stage == "time"`** — that is the cascade; render the time question
+immediately without re-fetching.
+Response `400`: `{"detail": "This plan is scheduled; voting is closed."}`
+
+### `POST /plans/{plan_id}/time-vote`
+Stage 2. Only the interested cohort may answer, and only the active time.
+`round_id` is **required** so a vote cast while the host was switching times
+can't silently land on the wrong one.
+
+Request:
+```json
+{"yes": true, "round_id": 5}
+```
+Response `200`: the updated plan object.
+Response `403`: `{"detail": "Say you're in for the plan first — times are only asked of people who are."}`
+Response `409`: `{"detail": "The host moved on — the question is now Mon 20 Jul 19:00-20:00."}` — re-fetch and show the new question.

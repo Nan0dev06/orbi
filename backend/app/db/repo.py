@@ -11,7 +11,9 @@ import secrets
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Group, GroupEvent, Membership, Poll, User, Vote
+from app.db.models import (
+    Group, GroupEvent, InterestVote, Membership, Plan, TimeRound, TimeVote, User,
+)
 
 
 # ----------------------------------------------------------------- users
@@ -103,45 +105,80 @@ def get_user_groups(session: Session, user: User) -> list[Group]:
     return list(rows)
 
 
-# ----------------------------------------------------------------- polls
+# ----------------------------------------------------------------- plans
 
-def create_poll(
+def create_plan(
     session: Session,
     group: Group,
-    creator: User,
+    host: User,
     title: str,
-    slot_start_utc,
-    slot_end_utc,
-    min_yes: int,
+    slots: list[tuple],          # ordered [(start_utc, end_utc), ...] candidate times
     location: str | None = None,
-) -> Poll:
-    poll = Poll(
-        group_id=group.id, created_by=creator.id, title=title, location=location,
-        slot_start_utc=slot_start_utc, slot_end_utc=slot_end_utc, min_yes=min_yes,
-    )
-    session.add(poll)
+) -> Plan:
+    """Create a plan with its candidate times queued in order.
+
+    The first time is activated immediately, so the moment a member says yes to
+    the interest question they have a time to answer. The host suggested the
+    plan, so their interest is recorded as yes up front — they still vote on
+    the times themselves.
+    """
+    plan = Plan(group_id=group.id, created_by=host.id, title=title, location=location)
+    session.add(plan)
+    session.flush()  # assign plan.id
+    for i, (start, end) in enumerate(slots):
+        session.add(TimeRound(
+            plan_id=plan.id, ordinal=i, slot_start_utc=start, slot_end_utc=end,
+            status="active" if i == 0 else "queued",
+        ))
+    session.add(InterestVote(plan_id=plan.id, user_id=host.id, yes=True))
     session.commit()
-    return poll
+    return plan
 
 
-def get_poll(session: Session, poll_id: int) -> Poll | None:
-    return session.get(Poll, poll_id)
+def get_plan(session: Session, plan_id: int) -> Plan | None:
+    return session.get(Plan, plan_id)
 
 
-def get_group_polls(session: Session, group_id: int, only_open: bool = False) -> list[Poll]:
-    q = select(Poll).where(Poll.group_id == group_id).order_by(Poll.created_at.desc())
+def get_group_plans(session: Session, group_id: int, only_open: bool = False) -> list[Plan]:
+    q = select(Plan).where(Plan.group_id == group_id).order_by(Plan.created_at.desc())
     if only_open:
-        q = q.where(Poll.status == "open")
+        q = q.where(Plan.status == "open")
     return list(session.scalars(q))
 
 
-def cast_vote(session: Session, poll: Poll, user: User, yes: bool) -> Vote:
-    """Record a vote; voting again replaces the previous vote."""
+def get_active_round(session: Session, plan: Plan) -> TimeRound | None:
+    return session.scalar(
+        select(TimeRound).where(TimeRound.plan_id == plan.id, TimeRound.status == "active")
+    )
+
+
+def get_next_queued_round(session: Session, plan: Plan) -> TimeRound | None:
+    return session.scalar(
+        select(TimeRound)
+        .where(TimeRound.plan_id == plan.id, TimeRound.status == "queued")
+        .order_by(TimeRound.ordinal)
+    )
+
+
+def count_queued_rounds(session: Session, plan: Plan) -> int:
+    return len(list(session.scalars(
+        select(TimeRound).where(TimeRound.plan_id == plan.id, TimeRound.status == "queued")
+    )))
+
+
+def get_round(session: Session, round_id: int) -> TimeRound | None:
+    return session.get(TimeRound, round_id)
+
+
+def cast_interest(session: Session, plan: Plan, user: User, yes: bool) -> InterestVote:
+    """Stage 1 vote; voting again replaces the previous answer."""
     vote = session.scalar(
-        select(Vote).where(Vote.poll_id == poll.id, Vote.user_id == user.id)
+        select(InterestVote).where(
+            InterestVote.plan_id == plan.id, InterestVote.user_id == user.id
+        )
     )
     if vote is None:
-        vote = Vote(poll_id=poll.id, user_id=user.id, yes=yes)
+        vote = InterestVote(plan_id=plan.id, user_id=user.id, yes=yes)
         session.add(vote)
     else:
         vote.yes = yes
@@ -149,20 +186,47 @@ def cast_vote(session: Session, poll: Poll, user: User, yes: bool) -> Vote:
     return vote
 
 
-def get_poll_votes(session: Session, poll: Poll) -> dict[str, bool]:
-    """email -> yes/no for everyone who has voted on this poll."""
-    rows = session.scalars(select(Vote).where(Vote.poll_id == poll.id))
+def cast_time_vote(session: Session, round_: TimeRound, user: User, yes: bool) -> TimeVote:
+    """Stage 2 vote on one candidate time; voting again replaces the previous."""
+    vote = session.scalar(
+        select(TimeVote).where(TimeVote.round_id == round_.id, TimeVote.user_id == user.id)
+    )
+    if vote is None:
+        vote = TimeVote(round_id=round_.id, user_id=user.id, yes=yes)
+        session.add(vote)
+    else:
+        vote.yes = yes
+    session.commit()
+    return vote
+
+
+def get_interest_votes(session: Session, plan: Plan) -> dict[str, bool]:
+    """email -> yes/no for everyone who answered the plan's interest question."""
+    rows = session.scalars(select(InterestVote).where(InterestVote.plan_id == plan.id))
     return {v.user.email: v.yes for v in rows}
 
 
-def set_poll_status(session: Session, poll: Poll, status: str) -> None:
-    poll.status = status
+def get_time_votes(session: Session, round_: TimeRound | None) -> dict[str, bool]:
+    """email -> yes/no for everyone who voted on this candidate time."""
+    if round_ is None:
+        return {}
+    rows = session.scalars(select(TimeVote).where(TimeVote.round_id == round_.id))
+    return {v.user.email: v.yes for v in rows}
+
+
+def set_plan_status(session: Session, plan: Plan, status: str) -> None:
+    plan.status = status
     session.commit()
 
 
-def mark_poll_booked(session: Session, poll: Poll, event_link: str | None) -> None:
-    poll.booked = True
-    poll.event_link = event_link
+def set_round_status(session: Session, round_: TimeRound, status: str) -> None:
+    round_.status = status
+    session.commit()
+
+
+def mark_round_booked(session: Session, round_: TimeRound, event_link: str | None) -> None:
+    round_.booked = True
+    round_.event_link = event_link
     session.commit()
 
 

@@ -129,7 +129,7 @@ def compute_availability(
             {
                 "start": _fmt(s, tz),
                 "end": _fmt(e, tz),
-                # ISO forms are for tool calls (create_poll) — copy verbatim
+                # ISO forms are for tool calls (create_plan) — copy verbatim
                 "start_iso": s.astimezone(tz).isoformat(),
                 "end_iso": e.astimezone(tz).isoformat(),
                 "duration_minutes": int((e - s).total_seconds() // 60),

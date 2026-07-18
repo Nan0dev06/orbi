@@ -11,13 +11,23 @@ from fastapi import Cookie, Depends, HTTPException
 from itsdangerous import BadSignature, URLSafeSerializer
 from sqlalchemy.orm import Session
 
-from app.core.config import SECRET_KEY
+from app.core.config import GOOGLE_REDIRECT_URI, SECRET_KEY
 from app.db.models import User
 from app.db import repo
 from app.db.session import get_session
 
 COOKIE_NAME = "orbi_session"
 _signer = URLSafeSerializer(SECRET_KEY, salt="orbi-session")
+
+# The cookie IS the login, so it must never cross the wire in clear text. It
+# can't be Secure on http://localhost though — the browser would silently drop
+# it and dev logins would just stop working. The redirect URI tells us which
+# world we're in: https means deployed.
+COOKIE_SECURE = GOOGLE_REDIRECT_URI.startswith("https://")
+
+# Cookie args shared by every place that sets an auth cookie, so a flag can
+# never be tightened in one spot and forgotten in another.
+COOKIE_KWARGS = {"httponly": True, "secure": COOKIE_SECURE, "samesite": "lax"}
 
 
 def make_session_cookie(user_id: int) -> str:
