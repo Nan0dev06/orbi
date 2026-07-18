@@ -517,8 +517,10 @@ function NewPollModal() {
   // poll → don't create it twice; link to the live one, or explain the failure
   const findDuplicate = (bodySlots) => {
     const norm = (s) => (s || "").trim().toLowerCase();
+    // compare slots as instants — our ISO strings end in "Z", the backend's
+    // in "+00:00", so string equality would never fire
     const key = (t, l, ss) =>
-      `${norm(t)}|${norm(l)}|${ss.map((s) => s.start_iso + s.end_iso).sort().join(",")}`;
+      `${norm(t)}|${norm(l)}|${ss.map((s) => `${new Date(s.start_iso).getTime()}-${new Date(s.end_iso).getTime()}`).sort().join(",")}`;
     const mine = key(title, where, bodySlots);
     return plans.find(
       (p) =>
@@ -530,6 +532,11 @@ function NewPollModal() {
     if (busy) return;
     if (!title.trim()) {
       setErr("A poll needs a title — the rest can be voted on.");
+      return;
+    }
+    // times without a day would be silently dropped by buildSlots — say so
+    if (!interestOnly && !date && slots.some((s) => s.start && s.end)) {
+      setErr("Pick which day those times are on.");
       return;
     }
     const bodySlots = interestOnly ? [] : buildSlots();

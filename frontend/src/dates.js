@@ -8,10 +8,15 @@ export function startOfDay(d) {
   return x;
 }
 
+// Calendar-day arithmetic via date parts, not ms — adding 24h lands an hour
+// off (and on the wrong day) in the week a DST transition falls.
+export const addDays = (d, n) =>
+  new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+
 export function mondayOf(d) {
   const x = startOfDay(d);
   const dow = (x.getDay() + 6) % 7; // Mon=0
-  return new Date(x.getTime() - dow * DAY_MS);
+  return addDays(x, -dow);
 }
 
 export const sameDay = (a, b) =>
@@ -52,7 +57,7 @@ export function fmtTime(d) {
 export const fmtRange = (a, b) => `${fmtTime(a)}–${fmtTime(b)}`;
 
 export function fmtWeekLabel(monday) {
-  const sun = new Date(monday.getTime() + 6 * DAY_MS);
+  const sun = addDays(monday, 6);
   if (monday.getMonth() === sun.getMonth())
     return `${MONTHS[monday.getMonth()]} ${monday.getDate()}–${sun.getDate()}`;
   return `${MONTHS[monday.getMonth()]} ${monday.getDate()} – ${MONTHS[sun.getMonth()]} ${sun.getDate()}`;
@@ -66,12 +71,17 @@ export function relTime(ts) {
   return `${Math.floor(s / 86400)}d`;
 }
 
-// 35 cells (7x5) starting the Monday on/before the 1st of the month.
+// Full weeks covering the month, starting the Monday on/before the 1st.
+// 5 weeks usually, 6 when the month spills into one (e.g. a 31-day month
+// starting on a weekend) — a fixed 35 would drop the last day(s).
 export function monthCells(anchor) {
   const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
   const start = mondayOf(first);
-  return Array.from({ length: 35 }, (_, i) => {
-    const d = new Date(start.getTime() + i * DAY_MS);
+  const daysInMonth = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
+  const lead = Math.round((first - start) / DAY_MS);
+  const weeks = Math.ceil((lead + daysInMonth) / 7);
+  return Array.from({ length: weeks * 7 }, (_, i) => {
+    const d = addDays(start, i);
     return { date: d, dim: d.getMonth() !== anchor.getMonth() };
   });
 }
