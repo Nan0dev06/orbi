@@ -113,23 +113,69 @@ def seed(session, me_email: str | None) -> None:
             end_utc=end or (start + timedelta(hours=2) if start else None), done=done,
         ))
 
-    # ---- Beirut Crew: a busy social week -----------------------------------
-    event(g1, aya, "event", "Dinner at Kalei", "Event", "Kalei Coffee Co.", _at(1, 19))
-    event(g1, karim, "event", "Movie night", "Event", "ABC Verdun VOX", _at(3, 20))
-    event(g1, lina, "event", "Beach day", "Event", "Lazy B", _at(6, 10), _at(6, 17))
-    event(g1, aya, "task", "Book the table for Friday", "Task", "Kalei Coffee Co.", _at(0, 17))
-    event(g1, karim, "task", "Split the fuel money", "Errand", None, _at(2, 12))
-    event(g1, lina, "task", "Bring the speakers", "Prep", None, _at(5, 12))
+    # ---- ~10 events/tasks PER USER, spread across their groups -------------
+    # A couple land in the past (so review nudges fire); the rest spread over
+    # the next three weeks so day/week/month views all have content.
+    EVENT_IDEAS = [
+        ("Dinner at Kalei", "Event", "Kalei Coffee Co."),
+        ("Movie night", "Event", "ABC Verdun VOX"),
+        ("Beach day", "Event", "Lazy B"),
+        ("Coffee catch-up", "Meet", "BHive Cafe"),
+        ("Physics review session", "Meet", "AUB Jafet Library"),
+        ("Mock exam", "Meet", "Bliss Hall 204"),
+        ("Tannourine cedars hike", "Event", "Tannourine Cedar Reserve"),
+        ("Brunch", "Event", "Em Sherif Cafe"),
+        ("Board games night", "Event", "Backburner Coffee"),
+        ("Study sprint", "Meet", "AUB Jafet Library"),
+        ("Sunset walk", "Event", "Corniche Beirut"),
+        ("Karaoke warm-up", "Event", "Cheers Broumana"),
+        ("Group call", "Call", None),
+        ("Football five-a-side", "Event", "Beirut By Bike Pitch"),
+    ]
+    TASK_IDEAS = [
+        ("Book the table for Friday", "Task", "Kalei Coffee Co."),
+        ("Split the fuel money", "Errand", None),
+        ("Bring the speakers", "Prep", None),
+        ("Share the problem sets", "Task", None),
+        ("Print past exams", "Errand", "Malik's Bookshop"),
+        ("Check the trail conditions", "Prep", None),
+        ("Buy sunscreen for the beach", "Errand", None),
+        ("Reserve the karaoke room", "Task", "Cheers Broumana"),
+        ("Charge the camera batteries", "Prep", None),
+        ("Collect everyone's availability", "Task", None),
+        ("Pick a birthday gift for Aya", "Errand", "ABC Verdun"),
+        ("Upload the lecture notes", "Task", None),
+        ("Pack the first-aid kit", "Prep", None),
+        ("Confirm the minivan booking", "Task", None),
+    ]
 
-    # ---- Study group: deadlines --------------------------------------------
-    event(g2, karim, "event", "Physics review session", "Meet", "AUB Jafet Library", _at(2, 16))
-    event(g2, omar, "event", "Mock exam", "Meet", "Bliss Hall 204", _at(4, 9), _at(4, 12))
-    event(g2, maya, "task", "Share the problem sets", "Task", None, _at(1, 12))
-    event(g2, karim, "task", "Print past exams", "Errand", "Malik's Bookshop", _at(3, 12))
+    groups_of = {}
+    for g in (g1, g2, g3):
+        for m in session.scalars(
+            select(User).join(Membership, Membership.user_id == User.id)
+            .where(Membership.group_id == g.id)
+        ):
+            groups_of.setdefault(m.id, []).append(g)
+    users_by_id = {u.id: u for u in session.scalars(select(User))}
 
-    # ---- Hikers -------------------------------------------------------------
-    event(g3, lina, "event", "Tannourine cedars hike", "Event", "Tannourine Cedar Reserve", _at(8, 7), _at(8, 15))
-    event(g3, maya, "task", "Check the trail conditions", "Prep", None, _at(6, 12))
+    made = 0
+    for offset, (uid, ugroups) in enumerate(sorted(groups_of.items())):
+        u = users_by_id[uid]
+        for i in range(10):
+            # i//2 so the event/task pair rotates groups together — plain
+            # i % len would alias with the even/odd split below and dump
+            # every task into the same group
+            g = ugroups[(i // 2 + offset) % len(ugroups)]
+            # days -2..+19: a few finished outings, the rest upcoming
+            day = ((offset * 7 + i * 3) % 22) - 2
+            if i % 2 == 0:  # event
+                title, cat, loc = EVENT_IDEAS[(offset + i) % len(EVENT_IDEAS)]
+                hour = 9 + ((offset * 5 + i * 2) % 11)  # 9:00–20:00 starts
+                event(g, u, "event", title, cat, loc, _at(day, hour))
+            else:  # task
+                title, cat, loc = TASK_IDEAS[(offset + i) % len(TASK_IDEAS)]
+                event(g, u, "task", title, cat, loc, _at(day, 12), done=(day < 0))
+            made += 1
 
     # ---- Plans (two-stage polls) in the crew group --------------------------
     def plan(g, host, title, location, slot_pairs, interest=(), time_votes=(), status="open"):
@@ -167,7 +213,7 @@ def seed(session, me_email: str | None) -> None:
     )
 
     session.commit()
-    print("seeded: 5 demo users, 3 groups, 12 events/tasks, 3 plans"
+    print(f"seeded: 5 demo users, 3 groups, {made} events/tasks, 3 plans"
           + (f" (you are in Beirut Crew + Uni Study Group as {me_email})" if me else ""))
 
 

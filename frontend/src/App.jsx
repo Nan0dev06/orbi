@@ -9,16 +9,26 @@ import Shell from "./components/Shell.jsx";
 import { orbGradient } from "./theme.js";
 
 // ---- localStorage-backed state --------------------------------------------
+function readStored(key, initial) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw != null ? JSON.parse(raw) : initial;
+  } catch {
+    return initial;
+  }
+}
+
 function useStored(key, initial) {
-  const [val, setVal] = useState(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw != null ? JSON.parse(raw) : initial;
-    } catch {
-      return initial;
-    }
-  });
+  const [val, setVal] = useState(() => readStored(key, initial));
+  // when the key changes (e.g. per-group keys after a group switch), reload
+  // the new key's value instead of writing the old group's state into it
+  const keyRef = useRef(key);
+  if (keyRef.current !== key) {
+    keyRef.current = key;
+    setVal(readStored(key, initial));
+  }
   useEffect(() => {
+    if (keyRef.current !== key) return; // mid-switch render — don't cross-write
     try {
       localStorage.setItem(key, JSON.stringify(val));
     } catch {
@@ -132,21 +142,23 @@ export default function App() {
       setAvail({ members_busy: [], common_slots: [] });
       return;
     }
-    try {
-      const [ms, ps, evs] = await Promise.all([
-        api.members(activeGroupId),
-        api.plans(activeGroupId),
-        api.events(activeGroupId),
-      ]);
-      setMembers(decorateMembers(ms, meRef.current?.email));
-      setPlans(ps);
-      setGroupEvents(evs);
-    } catch {
-      // group may have been left/removed — fall back gracefully
-      setMembers([]);
-      setPlans([]);
-      setGroupEvents([]);
-    }
+    // fetch independently: one failing call (old server, dropped request)
+    // must never blank the others — losing members because /plans 404'd is
+    // exactly the bug this replaces
+    const [ms, ps, evs] = await Promise.allSettled([
+      api.members(activeGroupId),
+      api.plans(activeGroupId),
+      api.events(activeGroupId),
+    ]);
+    setMembers(
+      ms.status === "fulfilled"
+        ? decorateMembers(ms.value, meRef.current?.email)
+        : []
+    );
+    if (ps.status === "fulfilled") setPlans(ps.value);
+    else setPlans([]);
+    if (evs.status === "fulfilled") setGroupEvents(evs.value);
+    else setGroupEvents([]);
     // availability hits Google live for every member — slow, so don't block
     // the rest of the data on it
     api
