@@ -197,8 +197,8 @@ TOOL_SCHEMAS = [
             "properties": {
                 "days_ahead": {
                     "type": "integer",
-                    "description": "How many days forward from now to search (e.g. 7 for 'this week').",
-                    "minimum": 1,
+                    "description": "How many days forward from now to search (e.g. 7 for 'this week'). Use 0 for 'today only'.",
+                    "minimum": 0,
                     "maximum": 30,
                 },
                 "duration_minutes": {
