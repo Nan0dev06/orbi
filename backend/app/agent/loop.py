@@ -142,6 +142,22 @@ def _taste_notes(ctx: ToolContext) -> str | None:
     return "\n".join(lines)
 
 
+def _memory_notes(ctx: ToolContext) -> str | None:
+    """The user's own agent-memory notes, as prompt bullet lines.
+
+    Stored on the user (memory_json) and owned by the frontend Settings page;
+    injected here so the notes the user teaches Nudgy actually reach the model."""
+    raw = getattr(ctx.user, "memory_json", None)
+    if not raw:
+        return None
+    try:
+        notes = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    lines = [f"- {n.strip()}" for n in notes if isinstance(n, str) and n.strip()]
+    return "\n".join(lines[:50]) or None
+
+
 def run_agent(ctx: ToolContext, history: list[dict], user_message: str) -> AgentResult:
     """Run one turn of Nudgy. `history` is prior [{"role","content"}] messages
     (plain strings; not mutated — the caller decides what to persist)."""
@@ -153,6 +169,7 @@ def run_agent(ctx: ToolContext, history: list[dict], user_message: str) -> Agent
         group_name=ctx.group.name if ctx.group else None,
         group_id=ctx.group.id if ctx.group else None,
         taste_notes=_taste_notes(ctx),
+        memory_notes=_memory_notes(ctx),
     )
 
     if not LLM_API_KEY:

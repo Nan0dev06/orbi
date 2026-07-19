@@ -40,6 +40,10 @@ class User(Base):
     # unfinished things (event/poll started without a time) — a JSON array the
     # frontend owns entirely; stored server-side so drafts survive across devices
     drafts_json: Mapped[str | None] = mapped_column(String, default=None)
+    # freeform notes the user teaches the agent ("Aya can't do Fridays") — a
+    # JSON array of strings. Persisted here so it survives across devices AND so
+    # the agent prompt can actually read it (see agent/prompt.py memory block).
+    memory_json: Mapped[str | None] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     memberships: Mapped[list["Membership"]] = relationship(
@@ -209,6 +213,10 @@ class GroupEvent(Base):
     gcal_link: Mapped[str | None] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+    rsvps: Mapped[list["EventRsvp"]] = relationship(
+        back_populates="event", cascade="all, delete-orphan"
+    )
+
     # same SQLite-drops-tzinfo guard as Poll — always read via these
     @property
     def start(self) -> datetime | None:
@@ -238,6 +246,27 @@ class PlaceReview(Base):
     text: Mapped[str | None] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+    user: Mapped["User"] = relationship()
+
+
+class EventRsvp(Base):
+    """One member's RSVP to a group event (going | maybe | cant).
+
+    RSVP only applies to in-app group events (GroupEvent), never poll bookings
+    — a booked poll round already collected everyone's yes through the vote
+    cascade. One RSVP per (event, user); answering again replaces the old one.
+    Cascades away with its event (delete-orphan on GroupEvent.rsvps).
+    """
+    __tablename__ = "event_rsvps"
+    __table_args__ = (UniqueConstraint("event_id", "user_id", name="uq_event_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(String)  # going | maybe | cant
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    event: Mapped["GroupEvent"] = relationship(back_populates="rsvps")
     user: Mapped["User"] = relationship()
 
 

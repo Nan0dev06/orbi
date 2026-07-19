@@ -2,16 +2,16 @@ import { useState } from "react";
 import { useApp } from "../ctx.js";
 import {
   glass, gpill, dpill, dashPill, avatar, fieldStyle, fieldRead, fieldLabel,
-  toggleStyle, knobStyle, prefCard,
+  prefCard,
 } from "../theme.js";
-import { StarRow, GlassTimePicker, PlacePicker } from "../components/Fields.jsx";
+import { StarRow, PlacePicker } from "../components/Fields.jsx";
 import { relTime } from "../dates.js";
 
-const TABS = ["Account", "Preferences", "Memory", "Reviews", "Groups", "Notifications"];
+const TABS = ["Account", "Memory", "Reviews", "Groups"];
 
 export default function SettingsPage() {
   const {
-    me, displayName, saveProfile, prefs, setPrefs, memory, setMemory,
+    me, displayName, saveProfile, memory, setMemory,
     groups, members, activeGroup, setModal, logout, setSettingsTab, settingsTab,
     reviews, removeReview, setPage,
   } = useApp();
@@ -44,18 +44,6 @@ export default function SettingsPage() {
     }
     setEditingTz(false);
   };
-
-  const toggleRow = (key, label, sub) => (
-    <div key={key} style={prefCard}>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 14, fontWeight: 600 }}>{label}</div>
-        <div style={{ fontSize: 12, color: "#8c8577", marginTop: 2 }}>{sub}</div>
-      </div>
-      <div style={toggleStyle(prefs[key])} onClick={() => setPrefs((p) => ({ ...p, [key]: !p[key] }))}>
-        <div style={knobStyle(prefs[key])} />
-      </div>
-    </div>
-  );
 
   const addMemory = () => {
     const t = memInput.trim();
@@ -180,6 +168,14 @@ export default function SettingsPage() {
               </div>
             </div>
 
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={fieldLabel}>Privacy</span>
+              <div style={fieldRead}>
+                Groupmates only ever see that you're busy — never event titles,
+                places, or who else is there.
+              </div>
+            </div>
+
             <div style={{ height: 1, background: "rgba(150,142,128,.22)" }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
               <span style={fieldLabel}>What the agent remembers about you</span>
@@ -192,17 +188,6 @@ export default function SettingsPage() {
                 </div>
               </div>
             </div>
-          </>
-        )}
-
-        {settingsTab === "Preferences" && (
-          <>
-            {toggleRow("push", "Push notifications", "Votes, RSVPs, mentions")}
-            {toggleRow("digest", "Weekly email digest", "Sunday evening summary")}
-            {toggleRow("auto", "Auto-decline conflicts", "Off by default — when on, polls that clash with your events are declined for you")}
-            {prefs.auto &&
-              toggleRow("prio", "Let me choose which event wins", "When two things clash you pick the one to keep, instead of always losing the newer one")}
-            {toggleRow("busy", "Share busy times only", "Off by default. Leaving this off lets Nudgy see titles and places, so it can learn what you like from your reviews and plan around it")}
           </>
         )}
 
@@ -337,34 +322,6 @@ export default function SettingsPage() {
           </>
         )}
 
-        {settingsTab === "Notifications" && (
-          <>
-            {toggleRow("nvote", "Votes needed", "When a poll is waiting on you")}
-            {toggleRow("nrsvp", "RSVP updates", "When someone answers going or can't")}
-            {toggleRow("nment", "Mentions", "When someone tags you")}
-            {toggleRow(
-              "quiet",
-              "Quiet hours",
-              prefs.quiet
-                ? `Mute everything ${prefs.quietStart || "22:00"}–${prefs.quietEnd || "08:00"}`
-                : "Choose from when to when — turn it on and you'll pick the times"
-            )}
-            {prefs.quiet && (
-              <div style={{ ...prefCard, gap: 10 }}>
-                <span style={{ fontSize: 12.5, color: "#8c8577", flex: "none" }}>From</span>
-                <GlassTimePicker
-                  value={prefs.quietStart || "22:00"}
-                  onChange={(t) => setPrefs((p) => ({ ...p, quietStart: t }))}
-                />
-                <span style={{ fontSize: 12.5, color: "#8c8577", flex: "none" }}>to</span>
-                <GlassTimePicker
-                  value={prefs.quietEnd || "08:00"}
-                  onChange={(t) => setPrefs((p) => ({ ...p, quietEnd: t }))}
-                />
-              </div>
-            )}
-          </>
-        )}
       </div>
     </div>
   );

@@ -89,22 +89,6 @@ export default function App() {
   // persisted user-local state
   const gk = activeGroupId ? `.g${activeGroupId}` : "";
   const [activity, setActivity] = useStored(`nudgy.activity${gk}`, []);
-  const [rsvp, setRsvp] = useStored("nudgy.rsvp", {});
-  // v2: auto-decline + share-busy-only now default OFF (user opts in),
-  // quiet hours are editable, and conflict priority is a choice.
-  const [prefs, setPrefs] = useStored("nudgy.prefs2", {
-    push: true,
-    digest: false,
-    auto: false,
-    busy: false,
-    prio: true,
-    nvote: true,
-    nrsvp: true,
-    nment: true,
-    quiet: false,
-    quietStart: "22:00",
-    quietEnd: "08:00",
-  });
   const [memory, setMemory] = useStored("nudgy.memory", []);
   const [profile, setProfile] = useStored("nudgy.profile", {});
   const [readNotifs, setReadNotifs] = useStored("nudgy.readNotifs", []);
@@ -148,6 +132,10 @@ export default function App() {
           .getDrafts()
           .then(({ drafts: ds }) => ds.length && setDrafts(ds))
           .catch(() => {});
+        api
+          .getMemory()
+          .then(({ memory: mm }) => mm.length && setMemory(mm))
+          .catch(() => {});
       } catch {
         setMe(null);
       } finally {
@@ -169,6 +157,21 @@ export default function App() {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafts]);
+
+  // push memory changes to the server (debounced; skip the initial mount) so
+  // the notes the user teaches the agent survive across devices and reach the
+  // prompt on the next chat turn
+  const memoryBooted = useRef(false);
+  useEffect(() => {
+    if (!memoryBooted.current) {
+      memoryBooted.current = true;
+      return;
+    }
+    if (!me) return;
+    const t = setTimeout(() => api.putMemory(memory).catch(() => {}), 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memory]);
 
   const refreshGroupData = useCallback(async () => {
     if (!activeGroupId) {
@@ -339,6 +342,29 @@ export default function App() {
       setGroupEvents((evs) => evs.filter((e) => e.id !== eventId));
     },
     []
+  );
+
+  // RSVP to a group event (going/maybe/cant) — server-backed so groupmates see
+  // it. Optimistic: patch my status in immediately, then reconcile with the
+  // event the server returns; on failure, resync so a dropped RSVP can't stick.
+  const rsvpEvent = useCallback(
+    async (eventId, status) => {
+      const myEmail = meRef.current?.email;
+      setGroupEvents((evs) =>
+        evs.map((e) =>
+          e.id === eventId
+            ? { ...e, rsvps: { ...(e.rsvps || {}), [myEmail]: status } }
+            : e
+        )
+      );
+      try {
+        const updated = await api.rsvpEvent(eventId, status);
+        setGroupEvents((evs) => evs.map((e) => (e.id === eventId ? updated : e)));
+      } catch {
+        refreshGroupData();
+      }
+    },
+    [refreshGroupData]
   );
 
   // host deleting one of their polls entirely (there's no un-delete)
@@ -549,6 +575,7 @@ export default function App() {
         synced: e.synced,
         personal: e.personal,
         anonymous: e.anonymous,
+        rsvps: e.rsvps || {},
         emails: e.personal ? [e.creator_email] : members.map((m) => m.email),
       }));
     return [...fromPlans, ...fromBackend].sort((a, b) => a.start - b.start);
@@ -686,7 +713,7 @@ export default function App() {
     modal, setModal, groupOpen, setGroupOpen, notifOpen, setNotifOpen,
     settingsTab, setSettingsTab,
     chatOpen, setChatOpen, chatMsgs, chatTyping, doSend,
-    activity, pushActivity, rsvp, setRsvp, prefs, setPrefs,
+    activity, pushActivity, rsvpEvent,
     memory, setMemory, profile, setProfile,
     notifs, unread, readNotifs, setReadNotifs,
     reviews, addReview, removeReview, setReviews, favoritePlace,

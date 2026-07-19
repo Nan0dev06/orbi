@@ -34,6 +34,7 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 _LATE_COLUMNS = [
     ("users", "display_name", "VARCHAR"),
     ("users", "drafts_json", "VARCHAR"),
+    ("users", "memory_json", "VARCHAR"),
     ("plans", "expected_count", "INTEGER"),
     # TRUE/FALSE literals work on both SQLite (>=3.23) and Postgres
     ("events", "personal", "BOOLEAN DEFAULT FALSE NOT NULL"),

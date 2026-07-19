@@ -19,6 +19,7 @@ def build_system_prompt(
     group_name: str | None,
     group_id: int | None,
     taste_notes: str | None = None,
+    memory_notes: str | None = None,
 ) -> str:
     now_local = now_utc.astimezone(ZoneInfo(tz_name))
     group_line = (
@@ -40,6 +41,17 @@ rating that isn't listed here."""
         if taste_notes
         else ""
     )
+    memory_block = (
+        f"""
+
+# What {user_email} told you to remember
+{memory_notes}
+These are notes the user wrote for you to keep in mind when planning (e.g. who
+can't do certain days, standing constraints). Honour them, but they never
+override what a tool returns live — a real free/busy result always wins."""
+        if memory_notes
+        else ""
+    )
 
     return f"""You are Nudgy, an agentic scheduling assistant for groups of friends and \
 coworkers. You find a time when everyone is free to meet and explain your \
@@ -53,7 +65,7 @@ this instant. Show times in the user's zone ({tz_name}).
 
 # Who you're talking to
 - User: {user_email}
-- {group_line}{taste_block}
+- {group_line}{taste_block}{memory_block}
 
 # The decision loop
 1. get_group_members — who's in the group and calendar-connected.

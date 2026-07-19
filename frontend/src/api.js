@@ -49,11 +49,15 @@ export const api = {
   groupReviews: (groupId) => req(`/groups/${groupId}/reviews`),
   getDrafts: () => req("/auth/me/drafts"),
   putDrafts: (drafts) => req("/auth/me/drafts", { method: "PUT", body: { drafts } }),
+  getMemory: () => req("/auth/me/memory"),
+  putMemory: (memory) => req("/auth/me/memory", { method: "PUT", body: { memory } }),
   events: (groupId) => req(`/groups/${groupId}/events`),
   createEvent: (groupId, body) =>
     req(`/groups/${groupId}/events`, { method: "POST", body }),
   patchEvent: (eventId, body) =>
     req(`/events/${eventId}`, { method: "PATCH", body }),
+  rsvpEvent: (eventId, status) =>
+    req(`/events/${eventId}/rsvp`, { method: "POST", body: { status } }),
   deleteEvent: (eventId) => req(`/events/${eventId}`, { method: "DELETE" }),
   chat: (group_id, message, history) =>
     req("/chat", { method: "POST", body: { group_id, message, history } }),

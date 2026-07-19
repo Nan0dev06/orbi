@@ -50,6 +50,10 @@ class PatchEventBody(BaseModel):
     done: bool
 
 
+class RsvpBody(BaseModel):
+    status: str = Field(pattern="^(going|maybe|cant)$")
+
+
 def _require_membership(session: Session, user: User, group_id: int) -> None:
     if group_id not in {g.id for g in repo.get_user_groups(session, user)}:
         raise HTTPException(status_code=403, detail="You are not in this group.")
@@ -70,6 +74,7 @@ def _parse_iso(value: str | None, name: str) -> datetime | None:
 def _event_json(
     event: GroupEvent, tz_name: str,
     viewer_id: int | None = None, creator_email: str | None = None,
+    rsvps: dict[str, str] | None = None,
 ) -> dict:
     tz = ZoneInfo(tz_name)
     iso = lambda dt: dt.astimezone(tz).isoformat() if dt else None  # noqa: E731
@@ -93,6 +98,8 @@ def _event_json(
         "gcal_link": None if masked else event.gcal_link,
         "created_by": event.created_by,
         "creator_email": creator_email,
+        # {email: going|maybe|cant} — masked personal events never expose these
+        "rsvps": {} if masked else (rsvps or {}),
     }
 
 
@@ -107,8 +114,12 @@ def group_events(
     email_of = {m.id: m.email for m in members}
     events = repo.get_group_events(session, group_id, member_ids=list(email_of))
     return [
-        _event_json(e, user.timezone, viewer_id=user.id,
-                    creator_email=email_of.get(e.created_by))
+        _event_json(
+            e, user.timezone, viewer_id=user.id,
+            creator_email=email_of.get(e.created_by),
+            rsvps={email_of[r.user_id]: r.status
+                   for r in e.rsvps if r.user_id in email_of},
+        )
         for e in events
     ]
 
@@ -198,6 +209,37 @@ def patch_event(
     _require_membership(session, user, event.group_id)
     repo.set_event_done(session, event, body.done)
     return _event_json(event, user.timezone, viewer_id=user.id)
+
+
+@router.post("/events/{event_id}/rsvp")
+def rsvp_event(
+    event_id: int,
+    body: RsvpBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Record the caller's RSVP (going/maybe/cant) to a group event.
+
+    Only real group events take an RSVP: personal events are one person's own
+    thing, and poll bookings settled attendance through the vote cascade."""
+    event = repo.get_event(session, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="No such event.")
+    _require_membership(session, user, event.group_id)
+    if event.personal:
+        raise HTTPException(status_code=400, detail="Personal events don't take RSVPs.")
+    if event.kind != "event":
+        raise HTTPException(status_code=400, detail="Only events take RSVPs.")
+    repo.upsert_rsvp(session, event, user, body.status)
+
+    members = repo.get_group_members(session, event.group_id)
+    email_of = {m.id: m.email for m in members}
+    return _event_json(
+        event, user.timezone, viewer_id=user.id,
+        creator_email=email_of.get(event.created_by),
+        rsvps={email_of[r.user_id]: r.status
+               for r in event.rsvps if r.user_id in email_of},
+    )
 
 
 @router.delete("/events/{event_id}")

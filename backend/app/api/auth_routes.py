@@ -139,6 +139,37 @@ def put_drafts(
     return {"ok": True, "drafts": body.drafts}
 
 
+@router.get("/me/memory")
+def get_memory(user: User = Depends(get_current_user)):
+    """Freeform notes the user teaches the agent. Opaque JSON array of strings
+    the frontend owns; the agent prompt reads it (agent/prompt.py)."""
+    import json
+    try:
+        return {"memory": json.loads(user.memory_json) if user.memory_json else []}
+    except ValueError:
+        return {"memory": []}
+
+
+class MemoryBody(BaseModel):
+    memory: list[str] = Field(max_length=50)
+
+
+@router.put("/me/memory")
+def put_memory(
+    body: MemoryBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    import json
+    notes = [n.strip() for n in body.memory if n and n.strip()]
+    raw = json.dumps(notes)
+    if len(raw) > 20_000:
+        raise HTTPException(status_code=400, detail="Memory too large.")
+    user.memory_json = raw
+    session.commit()
+    return {"ok": True, "memory": notes}
+
+
 @router.post("/logout")
 def logout():
     response = JSONResponse({"ok": True})

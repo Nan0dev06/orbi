@@ -13,8 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    Group, GroupEvent, InterestVote, Membership, Plan, PlaceReview, TimeRound,
-    TimeVote, User,
+    EventRsvp, Group, GroupEvent, InterestVote, Membership, Plan, PlaceReview,
+    TimeRound, TimeVote, User,
 )
 
 
@@ -350,6 +350,31 @@ def set_event_gcal(session: Session, event: GroupEvent, gcal_id: str | None, lin
     event.gcal_event_id = gcal_id
     event.gcal_link = link
     session.commit()
+
+
+def upsert_rsvp(session: Session, event: GroupEvent, user: User, status: str) -> EventRsvp:
+    """One RSVP per (event, user); answering again replaces the previous one."""
+    from app.db.models import _utcnow
+
+    rsvp = session.scalar(
+        select(EventRsvp).where(
+            EventRsvp.event_id == event.id, EventRsvp.user_id == user.id
+        )
+    )
+    if rsvp is None:
+        rsvp = EventRsvp(event_id=event.id, user_id=user.id, status=status)
+        session.add(rsvp)
+    else:
+        rsvp.status = status
+        rsvp.updated_at = _utcnow()
+    session.commit()
+    return rsvp
+
+
+def get_event_rsvps(session: Session, event: GroupEvent) -> dict[str, str]:
+    """email -> status for everyone who RSVP'd to this event."""
+    rows = session.scalars(select(EventRsvp).where(EventRsvp.event_id == event.id))
+    return {r.user.email: r.status for r in rows}
 
 
 # ----------------------------------------------------------------- reviews

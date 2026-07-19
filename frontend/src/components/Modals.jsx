@@ -94,15 +94,26 @@ function CreateChooser() {
 
 // ---- view an event ----------------------------------------------------------
 function EventModal() {
-  const { modal, setModal, rsvp, setRsvp, members, reviews } = useApp();
+  const { modal, setModal, rsvpEvent, members, me, reviews } = useApp();
   const e = modal.event;
-  const my = rsvp[e.id];
+  // the modal holds a snapshot; track my own answer locally for instant
+  // feedback, seeded from what the server already has for me
+  const [my, setMy] = useState(e.rsvps?.[me?.email]);
   const past = e.end < new Date();
   const canReview =
     past && e.where && e.where !== "—" && !reviews.some((r) => r.place === e.where);
   // RSVP only makes sense for events you never voted on: poll-locked times
   // already collected everyone's yes, and a personal event is only yours
   const showRsvp = !e.booked && !e.personal && !past;
+  // merge the server's RSVPs with my in-flight choice for the tally below
+  const tally = { ...(e.rsvps || {}) };
+  if (me?.email) {
+    if (my) tally[me.email] = my;
+    else delete tally[me.email];
+  }
+  const nameOf = (email) =>
+    email === me?.email ? "You" : members.find((m) => m.email === email)?.name || email;
+  const withStatus = (s) => Object.keys(tally).filter((em) => tally[em] === s);
   const rsvpBtn = (v, label) => (
     <div
       style={{
@@ -110,7 +121,7 @@ function EventModal() {
         ...(my === v ? dpill(true) : gpill(true)),
         ...(v === "cant" && my !== v ? { color: "#a09889" } : {}),
       }}
-      onClick={() => setRsvp((r) => ({ ...r, [e.id]: v }))}
+      onClick={() => { setMy(v); rsvpEvent(e.backendId, v); }}
     >
       {label}
     </div>
@@ -173,9 +184,31 @@ function EventModal() {
               {rsvpBtn("maybe", "Maybe")}
               {rsvpBtn("cant", "Can't go")}
             </div>
-            <span style={{ fontSize: 10.5, color: "#a09889" }}>
-              Someone added this directly — let them know if you can make it.
-            </span>
+            {(() => {
+              const going = withStatus("going");
+              const maybe = withStatus("maybe");
+              const cant = withStatus("cant");
+              if (!going.length && !maybe.length && !cant.length)
+                return (
+                  <span style={{ fontSize: 10.5, color: "#a09889" }}>
+                    Someone added this directly — let them know if you can make it.
+                  </span>
+                );
+              const line = (label, list, color) =>
+                list.length ? (
+                  <div style={{ fontSize: 11.5, color: "#8c8577" }}>
+                    <b style={{ color }}>{label} {list.length}</b>
+                    {" · "}{list.map(nameOf).join(", ")}
+                  </div>
+                ) : null;
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {line("Going", going, "#2A9D8F")}
+                  {line("Maybe", maybe, "#DCA744")}
+                  {line("Can't", cant, "#b08a80")}
+                </div>
+              );
+            })()}
           </div>
         )}
         {e.booked && (
