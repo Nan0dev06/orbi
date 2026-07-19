@@ -216,12 +216,13 @@ export default function App() {
   // plan is open (per spec). Without this the frontend is a frozen snapshot: the
   // host never sees votes land, and members never see the host lock in or move to
   // the next time. Plans-only (not the full refresh) so we don't re-hit Google
-  // freebusy every tick; pauses when the tab is hidden or no plan is open.
+  // freebusy every tick. No document.hidden guard on purpose: in webviews /
+  // screen-share it can read hidden even while visible, which would silently
+  // freeze the view — the whole bug this fixes.
   const hasOpenPlan = plans.some((p) => p.status === "open");
   useEffect(() => {
     if (!me || !activeGroupId || !hasOpenPlan) return;
     const id = setInterval(() => {
-      if (document.hidden) return;
       api.plans(activeGroupId).then(setPlans).catch(() => {});
     }, 5000);
     return () => clearInterval(id);
