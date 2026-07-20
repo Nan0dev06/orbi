@@ -332,12 +332,3 @@ Each phase must work before the next begins.
 - **A failed booking doesn't strand a plan**: if Google refuses or throws, the time reverts to active so the host can retry or move on, instead of sticking in a state that is neither bookable nor skippable.
 - **A failed venue search is not an empty neighbourhood**: Overpass is a free public API and 504s under load. Transient failures are retried, and a search that still fails is reported as *"the venue lookup is temporarily down"* — never as "there are no cafes there", which would be Nudgy stating something false about a real place.
 
-## Roadmap / Not Yet Built
-
-All four phases are built, verified, and deployed. Beyond that:
-
-- **True push** (WebSockets). The host's report currently arrives via short polling while a plan is open, which is enough for in-app use; there are no notifications outside the app, and Google's own invite emails cover the notification feel once something is booked.
-- Recurring events, multi-group membership UX, roles/permissions
-- Preference learning ("Ali never wants Monday mornings")
-- Calendar providers beyond Google
-- Production hardening: rate limiting, encrypted-at-rest token storage, multi-instance deployment
